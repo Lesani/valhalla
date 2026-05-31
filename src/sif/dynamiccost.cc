@@ -703,6 +703,10 @@ void ParseCosting(const rapidjson::Document& doc,
       sif::ParseMotorcycleCostOptions(doc, key, costing, warnings);
       break;
     }
+    case Costing::motorcycle_curvy: {
+      sif::ParseMotorcycleCurvyCostOptions(doc, key, costing, warnings);
+      break;
+    }
     case Costing::none_: {
       sif::ParseNoCostOptions(doc, key, costing, warnings);
       break;

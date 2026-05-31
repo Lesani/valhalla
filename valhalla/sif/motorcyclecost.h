@@ -28,6 +28,25 @@ void ParseMotorcycleCostOptions(const rapidjson::Document& doc,
  */
 cost_ptr_t CreateMotorcycleCost(const Costing& costing);
 
+/**
+ * Parses the motorcycle_curvy cost options from json and stores values in pbf.
+ * Issue 03 (API tracer): delegates to ParseMotorcycleCostOptions until the
+ * curvy-routing options are added in Issues 06 (curvy_alpha) and 08
+ * (use_scenic_tolls).
+ */
+void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
+                                     const std::string& costing_options_key,
+                                     Costing* pbf_costing,
+                                     google::protobuf::RepeatedPtrField<CodedDescription>& warnings);
+
+/**
+ * Create the curvy-routing motorcycle cost method (better_mc_routing v1).
+ * Issue 03: returns a MotorcycleCurvyCost that inherits MotorcycleCost
+ * behavior unchanged. Algorithm work lands in subsequent issues.
+ * @param  costing pbf with request options.
+ */
+cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing);
+
 } // namespace sif
 } // namespace valhalla
 

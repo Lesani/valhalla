@@ -132,6 +132,7 @@ message Costing {
     auto_ = 10;
     bikeshare = 11;    // turns into pedestrian + bike
     auto_pedestrian = 12; // turns into auto + pedestrian
+    motorcycle_curvy = 13; // curvy-routing variant of motorcycle (better_mc_routing v1)
   }
 
   message Options {

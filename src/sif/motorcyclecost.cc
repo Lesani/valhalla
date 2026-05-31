@@ -607,6 +607,43 @@ cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
   return std::make_shared<MotorcycleCost>(costing_options);
 }
 
+/**
+ * MotorcycleCurvyCost — curvy-routing variant of MotorcycleCost
+ * (better_mc_routing v1). Issue 03 is the API tracer: this subclass
+ * inherits every method from MotorcycleCost without override, so a
+ * request with costing=motorcycle_curvy is routed identically to one
+ * with costing=motorcycle. Algorithm work lands in Issues 06–09.
+ */
+class MotorcycleCurvyCost : public MotorcycleCost {
+public:
+  MotorcycleCurvyCost(const Costing& costing_options) : MotorcycleCost(costing_options) {
+  }
+};
+
+void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
+                                     const std::string& costing_options_key,
+                                     Costing* c,
+                                     google::protobuf::RepeatedPtrField<CodedDescription>& warnings) {
+  c->set_type(Costing::motorcycle_curvy);
+  c->set_name(Costing_Enum_Name(c->type()));
+  auto* co = c->mutable_options();
+
+  rapidjson::Value dummy;
+  const auto& json = rapidjson::get_child(doc, costing_options_key.c_str(), dummy);
+
+  // Issue 03: reuse motorcycle's option ranges verbatim. Curvy-specific
+  // options (curvy_alpha, use_scenic_tolls) are added in Issues 06 and 08.
+  ParseBaseCostOptions(json, c, kBaseCostOptsConfig, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kUseHighwaysRange, json, "/use_highways", use_highways, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kUseTollsRange, json, "/use_tolls", use_tolls, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
+}
+
+cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
+  return std::make_shared<MotorcycleCurvyCost>(costing_options);
+}
+
 } // namespace sif
 } // namespace valhalla
 

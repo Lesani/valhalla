@@ -41,6 +41,7 @@ public:
     Register(Costing::taxi, CreateTaxiCost);
     Register(Costing::motor_scooter, CreateMotorScooterCost);
     Register(Costing::motorcycle, CreateMotorcycleCost);
+    Register(Costing::motorcycle_curvy, CreateMotorcycleCurvyCost);
     Register(Costing::pedestrian, CreatePedestrianCost);
     Register(Costing::truck, CreateTruckCost);
     Register(Costing::transit, CreateTransitCost);
