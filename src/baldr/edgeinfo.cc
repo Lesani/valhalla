@@ -116,6 +116,7 @@ size_t EdgeInfo::TaggedValueSize(const char* ptr) {
     case TaggedValue::kBssInfo:
     case TaggedValue::kLevel:
     case TaggedValue::kLevelRef:
+    case TaggedValue::kSinuosity:
     case TaggedValue::kTunnel:
     case TaggedValue::kBridge:
       // These are null-terminated strings after the tag byte
@@ -500,6 +501,19 @@ int8_t EdgeInfo::layer() const {
   return static_cast<int8_t>(value.front());
 }
 
+uint8_t EdgeInfo::sinuosity() const {
+  const auto& tags = GetTags();
+  auto itr = tags.find(TaggedValue::kSinuosity);
+  if (itr == tags.end()) {
+    return 0;
+  }
+  const auto& value = itr->second;
+  if (value.size() != 1) {
+    throw std::runtime_error("sinuosity must contain 1-byte value");
+  }
+  return static_cast<uint8_t>(value.front());
+}
+
 std::pair<std::vector<std::pair<float, float>>, uint32_t> EdgeInfo::levels() const {
   const auto& tags = GetTags();
   auto itr = tags.find(TaggedValue::kLevels);
@@ -636,6 +650,11 @@ void EdgeInfo::json(rapidjson::writer_wrapper_t& writer) const {
       case TaggedValue::kTunnel:
         break;
       case TaggedValue::kBridge:
+        break;
+      case TaggedValue::kSinuosity:
+        if (value.size() == 1) {
+          writer("sinuosity", static_cast<uint64_t>(static_cast<uint8_t>(value.front())));
+        }
         break;
     }
   }

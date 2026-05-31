@@ -4,6 +4,7 @@
 #include "baldr/graphconstants.h"
 #include "baldr/graphid.h"
 #include "baldr/signinfo.h"
+#include "baldr/sinuosity.h"
 #include "baldr/tilehierarchy.h"
 #include "midgard/logging.h"
 #include "midgard/pointll.h"
@@ -926,6 +927,16 @@ void BuildTileSet(const std::string& ways_file,
             if (!osm_node_ids.empty()) {
               // not moving here because we want to re-use the string on the next iteration
               tagged_values.push_back(encoded_node_ids);
+            }
+
+            // Append sinuosity as a tagged value (better_mc_routing v1).
+            // Encoding mirrors kLayer: 1 tag byte + 1 payload byte.
+            {
+              std::string sin_tag;
+              sin_tag.reserve(2);
+              sin_tag.push_back(static_cast<char>(TaggedValue::kSinuosity));
+              sin_tag.push_back(static_cast<char>(valhalla::baldr::compute_sinuosity_byte(shape)));
+              tagged_values.push_back(std::move(sin_tag));
             }
 
             // Update bike_network type

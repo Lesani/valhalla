@@ -407,6 +407,7 @@ enum class TaggedValue : uint8_t { // must start at 1 due to nulls
   kConditionalSpeedLimits = 7,
   kLevels = 8,
   kOSMNodeIds = 9,
+  kSinuosity = 10, // better_mc_routing: quantized arc/chord ratio, 0=straight raw 1.0, 255=raw>=3.0
   // we used to have bug when we encoded 1 and 2 as their ASCII codes, but not actual 1 and 2 values
   // see https://github.com/valhalla/valhalla/issues/3262
   kTunnel = static_cast<uint8_t>('1'),
