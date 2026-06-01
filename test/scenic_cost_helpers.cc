@@ -12,6 +12,8 @@ using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
 using valhalla::sif::class_multiplier;
 using valhalla::sif::curvy_bonus;
+using valhalla::sif::is_scenic_toll;
+using valhalla::sif::toll_multiplier;
 
 namespace {
 
@@ -81,6 +83,50 @@ TEST(ClassMultiplier, CalimotoFixDirection) {
   // E2E test; here just check the multipliers exist and the math runs.
   EXPECT_GT(straight_tertiary, 0.0f);
   EXPECT_GT(curvy_residential, 0.0f);
+}
+
+// ---- is_scenic_toll + toll_multiplier (Issue 08) ----
+
+TEST(ScenicToll, IsScenicTollClassHeuristic) {
+  // Tolled secondary/tertiary/unclassified are scenic (mountain passes);
+  // tolled motorway/trunk/primary are road tolls (highway tolls/tunnels).
+  EXPECT_TRUE(is_scenic_toll(true, RoadClass::kTertiary));
+  EXPECT_TRUE(is_scenic_toll(true, RoadClass::kSecondary));
+  EXPECT_TRUE(is_scenic_toll(true, RoadClass::kUnclassified));
+  EXPECT_FALSE(is_scenic_toll(true, RoadClass::kMotorway));
+  EXPECT_FALSE(is_scenic_toll(true, RoadClass::kTrunk));
+  EXPECT_FALSE(is_scenic_toll(true, RoadClass::kPrimary));
+  // Untolled edges are never scenic tolls regardless of class.
+  EXPECT_FALSE(is_scenic_toll(false, RoadClass::kTertiary));
+  EXPECT_FALSE(is_scenic_toll(false, RoadClass::kMotorway));
+}
+
+TEST(ScenicToll, MultiplierScalesWithUseScenicTolls) {
+  // Scenic-toll preference: tolled tertiary cheaper at use_scenic_tolls=0.7
+  // than at 0.2.
+  const float low_pref = toll_multiplier(true, RoadClass::kTertiary, 0.2f);
+  const float mid_pref = toll_multiplier(true, RoadClass::kTertiary, 0.5f);
+  const float high_pref = toll_multiplier(true, RoadClass::kTertiary, 0.7f);
+  EXPECT_NEAR(low_pref, 1.6f, 1e-5f);
+  EXPECT_NEAR(mid_pref, 1.0f, 1e-5f);
+  EXPECT_NEAR(high_pref, 0.6f, 1e-5f);
+  EXPECT_LT(high_pref, low_pref);
+}
+
+TEST(ScenicToll, RoadTollFixedAvoidRegardlessOfPreference) {
+  // Road-toll multiplier is FIXED at 1.6 (= use_scenic_tolls=0.2) no matter
+  // what scenic-pref the user sets — can't accidentally unlock A10.
+  EXPECT_NEAR(toll_multiplier(true, RoadClass::kMotorway, 0.2f), 1.6f, 1e-5f);
+  EXPECT_NEAR(toll_multiplier(true, RoadClass::kMotorway, 0.5f), 1.6f, 1e-5f);
+  EXPECT_NEAR(toll_multiplier(true, RoadClass::kMotorway, 0.7f), 1.6f, 1e-5f);
+  EXPECT_NEAR(toll_multiplier(true, RoadClass::kTrunk, 0.7f), 1.6f, 1e-5f);
+  EXPECT_NEAR(toll_multiplier(true, RoadClass::kPrimary, 0.7f), 1.6f, 1e-5f);
+}
+
+TEST(ScenicToll, UntolledEdgeIsNeutral) {
+  // Untolled edge: no toll multiplier effect.
+  EXPECT_FLOAT_EQ(toll_multiplier(false, RoadClass::kMotorway, 0.5f), 1.0f);
+  EXPECT_FLOAT_EQ(toll_multiplier(false, RoadClass::kTertiary, 0.2f), 1.0f);
 }
 
 TEST(ClassMultiplier, MaxCurvyTertiaryCheaperThanStraightTertiary) {

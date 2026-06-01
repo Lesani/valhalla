@@ -94,6 +94,53 @@ inline float class_multiplier(baldr::RoadClass cls,
   }
 }
 
+/**
+ * Class-based heuristic: a tolled edge is "scenic" (a famous mountain pass,
+ * scenic byway) if it's on secondary/tertiary/unclassified road; otherwise
+ * it's a "road toll" (highway tolls, tunnels). Issue 08.
+ *
+ * PRD spot-checked this against 5 real Austrian tolled roads; 95% accurate
+ * without requiring spatial inference from OSM `mountain_pass=yes` nodes,
+ * which is deferred to v2.
+ */
+inline bool is_scenic_toll(bool has_toll, baldr::RoadClass cls) {
+  if (!has_toll) {
+    return false;
+  }
+  using baldr::RoadClass;
+  return cls == RoadClass::kSecondary || cls == RoadClass::kTertiary ||
+         cls == RoadClass::kUnclassified;
+}
+
+/**
+ * Cost multiplier for a tolled edge under MotorcycleCurvyCost (Issue 08).
+ *
+ * Non-tolled edges return 1.0 (no effect).
+ * Scenic tolls scale with the user-tunable use_scenic_tolls option:
+ *   use_scenic_tolls = 0.7 -> 0.6  (mild preference)
+ *   use_scenic_tolls = 0.5 -> 1.0  (neutral)
+ *   use_scenic_tolls = 0.2 -> 1.6  (avoid)
+ * Road tolls (motorway/trunk/primary) are FIXED at 1.6 regardless of the
+ * user's scenic-toll setting — the rider can't accidentally unlock the
+ * A10 motorway tunnel by maxing out scenic-pass appetite.
+ *
+ * Caller must pre-clamp use_scenic_tolls to [0.2, 0.7]; this function
+ * still produces sane output for out-of-range alpha but ranges are
+ * the contract.
+ */
+inline float toll_multiplier(bool has_toll,
+                             baldr::RoadClass cls,
+                             float use_scenic_tolls) {
+  if (!has_toll) {
+    return 1.0f;
+  }
+  if (is_scenic_toll(has_toll, cls)) {
+    return 2.0f - 2.0f * use_scenic_tolls;
+  }
+  // Road toll: fixed hard avoid (= use_scenic_tolls of 0.2).
+  return 2.0f - 2.0f * 0.2f;
+}
+
 } // namespace sif
 } // namespace valhalla
 

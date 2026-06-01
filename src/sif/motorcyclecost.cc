@@ -62,6 +62,8 @@ constexpr ranged_default_t<uint32_t> kMotorcycleSpeedRange{10, baldr::kMaxAssume
 // better_mc_routing v1: motorcycle_curvy option ranges. Clamped silently.
 constexpr float kDefaultCurvyAlpha = 0.6f;
 constexpr ranged_default_t<float> kCurvyAlphaRange{0.0f, kDefaultCurvyAlpha, 0.95f};
+constexpr float kDefaultUseScenicTolls = 0.5f;
+constexpr ranged_default_t<float> kUseScenicTollsRange{0.2f, kDefaultUseScenicTolls, 0.7f};
 
 constexpr float kHighwayFactor[] = {
     1.0f, // Motorway
@@ -622,9 +624,10 @@ cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
 class MotorcycleCurvyCost : public MotorcycleCost {
 public:
   MotorcycleCurvyCost(const Costing& costing_options) : MotorcycleCost(costing_options) {
-    // ParseMotorcycleCurvyCostOptions already clamped via kCurvyAlphaRange
-    // before this constructor runs, so the proto value is in [0.0, 0.95].
+    // ParseMotorcycleCurvyCostOptions already clamped both values via the
+    // ranged_default_t types before this constructor runs.
     curvy_alpha_ = costing_options.options().curvy_alpha();
+    use_scenic_tolls_ = costing_options.options().use_scenic_tolls();
   }
 
   Cost EdgeCost(const baldr::DirectedEdge* edge,
@@ -636,11 +639,13 @@ public:
     const uint8_t sin_byte = tile->edgeinfo(edge).sinuosity();
     const float bonus = curvy_alpha_ > 0.0f ? curvy_bonus(sin_byte, curvy_alpha_) : 1.0f;
     const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
-    return Cost(base.cost * bonus * cm, base.secs);
+    const float tm = toll_multiplier(edge->toll(), edge->classification(), use_scenic_tolls_);
+    return Cost(base.cost * bonus * cm * tm, base.secs);
   }
 
 protected:
   float curvy_alpha_;
+  float use_scenic_tolls_;
   ClassMultipliers class_mult_; // compile-time defaults, see scenic_cost_helpers.h
 };
 
@@ -666,6 +671,8 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kUseScenicTollsRange, json, "/use_scenic_tolls", use_scenic_tolls,
+                          warnings);
 }
 
 cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
