@@ -358,6 +358,13 @@ message Costing {
     oneof has_multimodal_start_end_max_distance {
       uint32 multimodal_start_end_max_distance = 96;
     }
+    // better_mc_routing v1: motorcycle_curvy costing options.
+    oneof has_curvy_alpha {
+      float curvy_alpha = 97;   // [0.0, 0.95] strength of sinuosity bonus
+    }
+    oneof has_use_scenic_tolls {
+      float use_scenic_tolls = 98; // [0.2, 0.7] scenic-toll preference
+    }
   }
 
   oneof has_options {

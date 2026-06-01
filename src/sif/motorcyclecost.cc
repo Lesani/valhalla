@@ -1,11 +1,13 @@
 #include "sif/motorcyclecost.h"
 #include "baldr/directededge.h"
+#include "baldr/edgeinfo.h"
 #include "baldr/graphconstants.h"
 #include "baldr/nodeinfo.h"
 #include "baldr/rapidjson_utils.h"
 #include "proto_conversions.h"
 #include "sif/costconstants.h"
 #include "sif/osrm_car_duration.h"
+#include "sif/scenic_cost_helpers.h"
 
 #ifdef INLINE_TEST
 #include "test.h"
@@ -56,6 +58,10 @@ constexpr ranged_default_t<float> kUseTollsRange{0, kDefaultUseTolls, 1.0f};
 constexpr ranged_default_t<float> kUseTrailsRange{0, kDefaultUseTrails, 1.0f};
 constexpr ranged_default_t<uint32_t> kMotorcycleSpeedRange{10, baldr::kMaxAssumedSpeed,
                                                            baldr::kMaxSpeedKph};
+
+// better_mc_routing v1: motorcycle_curvy option ranges. Clamped silently.
+constexpr float kDefaultCurvyAlpha = 0.6f;
+constexpr ranged_default_t<float> kCurvyAlphaRange{0.0f, kDefaultCurvyAlpha, 0.95f};
 
 constexpr float kHighwayFactor[] = {
     1.0f, // Motorway
@@ -609,15 +615,34 @@ cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
 
 /**
  * MotorcycleCurvyCost — curvy-routing variant of MotorcycleCost
- * (better_mc_routing v1). Issue 03 is the API tracer: this subclass
- * inherits every method from MotorcycleCost without override, so a
- * request with costing=motorcycle_curvy is routed identically to one
- * with costing=motorcycle. Algorithm work lands in Issues 06–09.
+ * (better_mc_routing v1). Issue 06 layers the per-edge curvy bonus on
+ * top of MotorcycleCost's existing factor; Issues 07-08 layer class
+ * multipliers and the scenic-toll heuristic on top of THAT.
  */
 class MotorcycleCurvyCost : public MotorcycleCost {
 public:
   MotorcycleCurvyCost(const Costing& costing_options) : MotorcycleCost(costing_options) {
+    // ParseMotorcycleCurvyCostOptions already clamped via kCurvyAlphaRange
+    // before this constructor runs, so the proto value is in [0.0, 0.95].
+    curvy_alpha_ = costing_options.options().curvy_alpha();
   }
+
+  Cost EdgeCost(const baldr::DirectedEdge* edge,
+                const baldr::GraphId& edgeid,
+                const graph_tile_ptr& tile,
+                const baldr::TimeInfo& time_info,
+                uint8_t& flow_sources) const override {
+    Cost base = MotorcycleCost::EdgeCost(edge, edgeid, tile, time_info, flow_sources);
+    if (curvy_alpha_ <= 0.0f) {
+      return base;
+    }
+    const uint8_t sin_byte = tile->edgeinfo(edge).sinuosity();
+    const float bonus = curvy_bonus(sin_byte, curvy_alpha_);
+    return Cost(base.cost * bonus, base.secs);
+  }
+
+protected:
+  float curvy_alpha_;
 };
 
 void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
@@ -631,13 +656,17 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   rapidjson::Value dummy;
   const auto& json = rapidjson::get_child(doc, costing_options_key.c_str(), dummy);
 
-  // Issue 03: reuse motorcycle's option ranges verbatim. Curvy-specific
-  // options (curvy_alpha, use_scenic_tolls) are added in Issues 06 and 08.
+  // Inherit motorcycle's base options (use_highways, use_tolls, use_trails,
+  // top_speed) — Issue 09 narrows the inherited defaults to curvy-friendly
+  // values. Curvy-specific options:
+  //   curvy_alpha (Issue 06)        — strength of sinuosity bonus
+  //   use_scenic_tolls (Issue 08)   — scenic-toll preference
   ParseBaseCostOptions(json, c, kBaseCostOptsConfig, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseHighwaysRange, json, "/use_highways", use_highways, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseTollsRange, json, "/use_tolls", use_tolls, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
+  JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
 }
 
 cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
