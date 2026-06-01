@@ -502,6 +502,12 @@ int8_t EdgeInfo::layer() const {
 }
 
 uint8_t EdgeInfo::sinuosity() const {
+  // Encoding: payload is a single byte equal to (raw_byte + 1) so that
+  // raw_byte 0 (perfectly straight) is not stored as a null terminator
+  // — that would truncate the tagged-value string at read time. The
+  // bias caps raw_byte at 254; raw values that quantize to 255 are
+  // stored as 255 too (lossy at the very top of the curvy range, which
+  // is already where the curvy_alpha bonus saturates).
   const auto& tags = GetTags();
   auto itr = tags.find(TaggedValue::kSinuosity);
   if (itr == tags.end()) {
@@ -511,7 +517,8 @@ uint8_t EdgeInfo::sinuosity() const {
   if (value.size() != 1) {
     throw std::runtime_error("sinuosity must contain 1-byte value");
   }
-  return static_cast<uint8_t>(value.front());
+  const uint8_t stored = static_cast<uint8_t>(value.front());
+  return stored == 0 ? 0 : static_cast<uint8_t>(stored - 1);
 }
 
 std::pair<std::vector<std::pair<float, float>>, uint32_t> EdgeInfo::levels() const {

@@ -58,6 +58,41 @@ TEST(Sinuosity, SemicircleApproximationByte72) {
   EXPECT_LE(byte, 80);
 }
 
+// ---- aggregate_shortcut_sinuosity tests ----
+
+using valhalla::baldr::aggregate_shortcut_sinuosity;
+using valhalla::baldr::EdgeSinuosity;
+
+TEST(Sinuosity, AggregateEqualLengthsMixedBytes) {
+  // PRD case: 3 equal-length base edges with raw {1.0, 2.0, 1.5}.
+  // Quantized bytes: 0, 127, 63 -> length-weighted mean = (0+127+63)/3 = 63.
+  // PRD expected ~64; truncating quantization yields 63.
+  const std::vector<EdgeSinuosity> base{{1000, 0}, {1000, 127}, {1000, 63}};
+  const uint8_t result = aggregate_shortcut_sinuosity(base);
+  EXPECT_GE(result, 62);
+  EXPECT_LE(result, 65);
+}
+
+TEST(Sinuosity, AggregateLengthSkewedTowardStraight) {
+  // PRD case: 1000m at raw 1.0 (byte 0) + 10m at raw 3.0 (byte 255).
+  // weighted = (1000*0 + 10*255) / 1010 = 2.52 -> byte 2.
+  const std::vector<EdgeSinuosity> base{{1000, 0}, {10, 255}};
+  const uint8_t result = aggregate_shortcut_sinuosity(base);
+  EXPECT_GE(result, 0);
+  EXPECT_LE(result, 4);
+}
+
+TEST(Sinuosity, AggregateAllEqualIsIdempotent) {
+  // PRD case: all base edges already at byte 100 -> aggregate stays at 100.
+  const std::vector<EdgeSinuosity> base{{500, 100}, {1500, 100}, {200, 100}};
+  EXPECT_EQ(aggregate_shortcut_sinuosity(base), 100);
+}
+
+TEST(Sinuosity, AggregateEmptyDefensiveZero) {
+  const std::vector<EdgeSinuosity> base{};
+  EXPECT_EQ(aggregate_shortcut_sinuosity(base), 0);
+}
+
 TEST(Sinuosity, TightZigzagClipsTo255) {
   // Zigzag whose arc is much longer than its straight chord (raw >> 3.0).
   // Verifies the clip-above-3.0 branch returns 255.

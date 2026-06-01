@@ -19,6 +19,41 @@ inline constexpr float kSinuosityScale = 255.0f / (kSinuosityRawMax - kSinuosity
 // Minimum chord length below which sinuosity is meaningless; treat as straight.
 inline constexpr float kSinuosityMinChordMeters = 1.0f;
 
+// (length_meters, sinuosity_byte) input pair for the shortcut aggregator.
+// Decoupled from DirectedEdge so the aggregator is a pure compute function
+// (PRD's `span<const DirectedEdge*>` would force a tile-lookup dep).
+struct EdgeSinuosity {
+  uint32_t length_m;
+  uint8_t byte;
+};
+
+/**
+ * Aggregate the sinuosity of multiple base edges into a single shortcut byte
+ * using a length-weighted mean.
+ *
+ * Because the byte<->raw quantization is linear and uniform, weighting the
+ * bytes directly is mathematically equivalent to weighting the inverse-decoded
+ * raw values and re-quantizing — but without floating-point error or two
+ * extra divides per edge.
+ *
+ * Empty input (defensive) returns 0.
+ */
+inline uint8_t aggregate_shortcut_sinuosity(std::span<const EdgeSinuosity> base_edges) {
+  if (base_edges.empty()) {
+    return 0;
+  }
+  uint64_t weighted_sum = 0;
+  uint64_t total_length = 0;
+  for (const auto& e : base_edges) {
+    weighted_sum += static_cast<uint64_t>(e.length_m) * e.byte;
+    total_length += e.length_m;
+  }
+  if (total_length == 0) {
+    return 0;
+  }
+  return static_cast<uint8_t>(weighted_sum / total_length);
+}
+
 /**
  * Compute the quantized sinuosity byte for a shape polyline.
  *

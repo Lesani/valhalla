@@ -3,6 +3,7 @@
 #include "baldr/graphid.h"
 #include "baldr/graphreader.h"
 #include "baldr/graphtile.h"
+#include "baldr/sinuosity.h"
 #include "baldr/tilehierarchy.h"
 #include "midgard/encoded.h"
 #include "midgard/logging.h"
@@ -414,6 +415,12 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
       // Form a shortcut edge.
       DirectedEdge newedge = *directededge;
 
+      // For length-weighted sinuosity aggregation across all base edges
+      // in this shortcut chain (Issue 05).
+      std::vector<EdgeSinuosity> base_sinuosity{
+          EdgeSinuosity{newedge.length(),
+                        tile->edgeinfo(directededge).sinuosity()}};
+
       // For computing weighted density and total turn duration along the shortcut
       uint32_t edge_length = newedge.length();
       float average_density = edge_length * newedge.density();
@@ -472,6 +479,16 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
           break;
         }
 
+        // Capture the next base edge's (length, sinuosity_byte) before
+        // ConnectEdges advances state — Issue 05 length-weighted aggregator.
+        {
+          graph_tile_ptr next_tile = reader.GetGraphTile(next_edge_id);
+          const DirectedEdge* next_de = next_tile->directededge(next_edge_id);
+          base_sinuosity.push_back(
+              EdgeSinuosity{next_de->length(),
+                            next_tile->edgeinfo(next_de).sinuosity()});
+        }
+
         // Connect the matching outbound directed edge (updates the next
         // end node in the new level). Keep track of the last restriction
         // on the connected shortcut - need to set that so turn restrictions
@@ -494,9 +511,26 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
       // aren't used in guidance
       bool forward = true;
       uint32_t idx = ((length & 0xfffff) | ((shape.size() & 0xfff) << 20));
+
+      // Aggregate sinuosity of all base edges in the shortcut chain (Issue 05)
+      // and emit as a kSinuosity TaggedValue on the shortcut's EdgeInfo.
+      // Payload bias (+1) mirrors graphbuilder.cc — keeps byte 0 from being
+      // stored as a null terminator and truncating the value.
+      std::vector<std::string> shortcut_tagged_values;
+      {
+        const uint8_t agg = aggregate_shortcut_sinuosity(base_sinuosity);
+        const uint8_t stored = agg == 255 ? 255 : static_cast<uint8_t>(agg + 1);
+        std::string sin_tag;
+        sin_tag.reserve(2);
+        sin_tag.push_back(static_cast<char>(TaggedValue::kSinuosity));
+        sin_tag.push_back(static_cast<char>(stored));
+        shortcut_tagged_values.push_back(std::move(sin_tag));
+      }
+
       uint32_t edge_info_offset =
           tilebuilder.AddEdgeInfo(idx, start_node, end_node, 0, 0, edgeinfo.bike_network(),
-                                  edgeinfo.speed_limit(), shape, {}, {}, {}, 0, forward, false);
+                                  edgeinfo.speed_limit(), shape, {}, shortcut_tagged_values, {}, 0,
+                                  forward, false);
       ;
 
       newedge.set_edgeinfo_offset(edge_info_offset);

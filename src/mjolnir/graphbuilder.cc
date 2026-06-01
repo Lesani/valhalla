@@ -930,12 +930,17 @@ void BuildTileSet(const std::string& ways_file,
             }
 
             // Append sinuosity as a tagged value (better_mc_routing v1).
-            // Encoding mirrors kLayer: 1 tag byte + 1 payload byte.
+            // Encoding: 1 tag byte + 1 payload byte. The payload is
+            // (raw_byte + 1) clamped to 255 so that raw_byte 0 (straight)
+            // is not stored as a null terminator, which would truncate
+            // the value at read time. The reader subtracts 1 on lookup.
             {
+              const uint8_t raw = valhalla::baldr::compute_sinuosity_byte(shape);
+              const uint8_t stored = raw == 255 ? 255 : static_cast<uint8_t>(raw + 1);
               std::string sin_tag;
               sin_tag.reserve(2);
               sin_tag.push_back(static_cast<char>(TaggedValue::kSinuosity));
-              sin_tag.push_back(static_cast<char>(valhalla::baldr::compute_sinuosity_byte(shape)));
+              sin_tag.push_back(static_cast<char>(stored));
               tagged_values.push_back(std::move(sin_tag));
             }
 
