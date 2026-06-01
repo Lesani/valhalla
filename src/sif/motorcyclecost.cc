@@ -660,16 +660,21 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   rapidjson::Value dummy;
   const auto& json = rapidjson::get_child(doc, costing_options_key.c_str(), dummy);
 
-  // Inherit motorcycle's base options (use_highways, use_tolls, use_trails,
-  // top_speed) — Issue 09 narrows the inherited defaults to curvy-friendly
-  // values. Curvy-specific options:
-  //   curvy_alpha (Issue 06)        — strength of sinuosity bonus
-  //   use_scenic_tolls (Issue 08)   — scenic-toll preference
+  // Issue 09: motorcycle_curvy hardcodes the inherited motorcycle options
+  // to curvy-friendly values that are NOT exposed in the v1 API surface.
+  // The user-facing knobs are only curvy_alpha and use_scenic_tolls.
+  //   use_highways = 0.1     strong motorway avoid
+  //   use_tolls = 0.2        ( = use_road_tolls) road-toll hard avoid;
+  //                          our toll_multiplier adds a 1.6x on top of this
+  //                          for road tolls, scenic tolls scale separately
+  //   use_trails = 0.0       forbid trails (road bike, not adventure tour)
+  //   top_speed = 120 km/h   discourage routing into 140+ km/h motorway
+  //                          edges via ETA component
   ParseBaseCostOptions(json, c, kBaseCostOptsConfig, warnings);
-  JSON_PBF_RANGED_DEFAULT(co, kUseHighwaysRange, json, "/use_highways", use_highways, warnings);
-  JSON_PBF_RANGED_DEFAULT(co, kUseTollsRange, json, "/use_tolls", use_tolls, warnings);
-  JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
-  JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
+  co->set_use_highways(0.1f);
+  co->set_use_tolls(0.2f);
+  co->set_use_trails(0.0f);
+  co->set_top_speed(120);
   JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseScenicTollsRange, json, "/use_scenic_tolls", use_scenic_tolls,
                           warnings);
