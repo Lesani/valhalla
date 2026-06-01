@@ -18,14 +18,15 @@
 namespace valhalla {
 namespace mjolnir {
 
-// Quantization-byte thresholds for the growth rules. PRD uses raw sinuosity
-// ratios (1.4 / 1.3); these constants are the floor(byte) equivalents using
-// the (raw - 1.0) * 127.5 quantization from valhalla/baldr/sinuosity.h.
-//   raw 1.4 -> floor(0.4 * 127.5) = 51   <-- but PRD spec calls for byte 102.
-//   raw 1.3 -> floor(0.3 * 127.5) = 38   <-- PRD spec calls for byte  76.
-// The PRD numbers (102, 76) are the published contract — we honour them
-// verbatim. They correspond to slightly stricter ratios than the description
-// (1.8 and ~1.6 respectively) and that is intentional per the issue body.
+// Quantization-byte thresholds for the growth rules. The PRD specifies the
+// SEED and GROW thresholds as wire bytes (102 and 76 respectively) — those
+// are authoritative. Inverting the (raw - 1.0) * 127.5 quantization from
+// valhalla/baldr/sinuosity.h gives the approximate raw arc/chord ratios:
+//   seed byte 102 -> raw ~1.8 (so a stretch starts on a clearly curvy edge)
+//   grow byte  76 -> raw ~1.6 (looser when extending — still firmly curvy)
+// The raw-ratio numbers in the PRD prose ("1.4 / 1.3") are approximate; the
+// wire bytes are the contract. If a future PRD revision retunes the
+// thresholds, update these constants — not the prose comment.
 inline constexpr uint8_t kSeedSinuosityByte = 102;
 inline constexpr uint8_t kGrowSinuosityByte = 76;
 

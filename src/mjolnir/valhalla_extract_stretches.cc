@@ -91,13 +91,15 @@ EdgeCandidate make_candidate(const GraphTile& tile, const DirectedEdge* de) {
 // If there are 0 or 2+ candidates we stop (an intersection breaks growth).
 // Returns an invalid GraphId on stop.
 GraphId next_edge_in_chain(GraphReader& reader,
-                           const GraphTile& current_tile,
+                           const graph_tile_ptr& current_tile,
                            const DirectedEdge* current_de,
-                           const GraphId& current_edge_id,
+                           const GraphId& /*current_edge_id*/,
                            RoadClass anchor_class) {
   const GraphId end_node = current_de->endnode();
-  graph_tile_ptr end_tile_ptr = (end_node.tile_base() == current_tile.id())
-                                     ? reader.GetGraphTile(current_tile.id())
+  // If the end node lives in the same tile we're already holding, reuse the
+  // existing ptr instead of round-tripping through the GraphReader cache.
+  graph_tile_ptr end_tile_ptr = (end_node.tile_base() == current_tile->id())
+                                     ? current_tile
                                      : reader.GetGraphTile(end_node);
   if (!end_tile_ptr) {
     return {};
@@ -164,7 +166,7 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
       }
     }
 
-    GraphId next = next_edge_in_chain(reader, *cur_tile, cur_de, cur_edge_id, anchor_class);
+    GraphId next = next_edge_in_chain(reader, cur_tile, cur_de, cur_edge_id, anchor_class);
     if (!next.is_valid()) break;
     graph_tile_ptr next_tile = (next.tile_base() == cur_tile->id())
                                    ? cur_tile
