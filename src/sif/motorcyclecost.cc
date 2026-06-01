@@ -633,16 +633,15 @@ public:
                 const baldr::TimeInfo& time_info,
                 uint8_t& flow_sources) const override {
     Cost base = MotorcycleCost::EdgeCost(edge, edgeid, tile, time_info, flow_sources);
-    if (curvy_alpha_ <= 0.0f) {
-      return base;
-    }
     const uint8_t sin_byte = tile->edgeinfo(edge).sinuosity();
-    const float bonus = curvy_bonus(sin_byte, curvy_alpha_);
-    return Cost(base.cost * bonus, base.secs);
+    const float bonus = curvy_alpha_ > 0.0f ? curvy_bonus(sin_byte, curvy_alpha_) : 1.0f;
+    const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
+    return Cost(base.cost * bonus * cm, base.secs);
   }
 
 protected:
   float curvy_alpha_;
+  ClassMultipliers class_mult_; // compile-time defaults, see scenic_cost_helpers.h
 };
 
 void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
