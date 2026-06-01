@@ -13,7 +13,8 @@ set(protobuf_descriptors
  descriptors/status.proto
  descriptors/matrix.proto
  descriptors/isochrone.proto
- descriptors/expansion.proto)
+ descriptors/expansion.proto
+ descriptors/stretches.proto)
 
 protobuf_generate_cpp(protobuf_srcs protobuf_hdrs ${protobuf_descriptors})
 

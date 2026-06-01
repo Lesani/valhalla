@@ -99,7 +99,8 @@ if(ENABLE_DATA_TOOLS)
   list(APPEND tests astar multimodal_astar complexrestriction countryaccess graphbuilder graphparser
     graphtilebuilder graphreader hierarchylimits isochrone predictive_traffic idtable mapmatch matrix matrix_bss minbb multipoint_routes
     names node_search reach recover_shortcut refs servicedays shape_attributes signinfo summary urban tar_index
-    thor_worker timedep_paths timeparsing trivial_paths uniquenames util_mjolnir utrecht lua alternates)
+    thor_worker timedep_paths timeparsing trivial_paths uniquenames util_mjolnir utrecht lua alternates
+    extract_stretches)
   if(ENABLE_HTTP AND ENABLE_SERVICES)
     list(APPEND tests http_tiles)
     # TODO: fix https://github.com/valhalla/valhalla/issues/3740
@@ -384,7 +385,14 @@ if(ENABLE_DATA_TOOLS)
   add_dependencies(run-graphbuilder build_timezones)
   if(ENABLE_HTTP AND ENABLE_SERVICES)
     # http_tiles needs the proper .tar file with index.bin
-    add_dependencies(run-http_tiles utrecht_tiles run-scripts)
+    # `run-scripts` only exists when Python_FOUND, which requires
+    # ENABLE_PYTHON_BINDINGS=ON. Add it conditionally so non-Python builds
+    # can still configure (better_mc_routing v2 Issue 02 — Slice 1 patch).
+    if (TARGET run-scripts)
+      add_dependencies(run-http_tiles utrecht_tiles run-scripts)
+    else()
+      add_dependencies(run-http_tiles utrecht_tiles)
+    endif()
   endif()
 endif()
 
