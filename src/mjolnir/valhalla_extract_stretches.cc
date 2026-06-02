@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <unordered_set>
@@ -179,6 +180,56 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
   return chain;
 }
 
+// Write a GeoJSON FeatureCollection of `collection` to `path`. Each Feature is
+// a LineString in [lon, lat] order (per RFC 7946) with the slice-7 QA
+// properties: stretch_id, length_km, score, road_class, mean_sinuosity.
+//
+// Single-line JSON, ASCII only, six decimals of coordinate precision (~11 cm
+// at the equator). No external JSON dependency — the schema is small enough
+// to write by hand, and pulling in nlohmann/rapidjson here would bloat the
+// build for a one-off serialization.
+//
+// Used by extract_stretches as the QA companion to stretches.bin (Slice 7
+// of the v2 PRD). Layer 0 of the toolchain stays binary-protobuf; this exists
+// only so reviewers can drop the output into uMap / QGIS / geopandas without
+// writing a custom proto reader.
+void write_geojson(const valhalla::StretchCollection& collection,
+                   const std::filesystem::path& path) {
+  std::ofstream geojson(path, std::ios::trunc);
+  if (!geojson) {
+    throw std::runtime_error("Failed to open output file: " + path.string());
+  }
+  // Six decimals matches what we serialize in protobuf (doubles), and keeps
+  // each line short for uMap-style preview tools.
+  geojson << std::fixed << std::setprecision(6);
+  geojson << R"({"type":"FeatureCollection","features":[)";
+  bool first = true;
+  for (int i = 0; i < collection.stretches_size(); ++i) {
+    const auto& s = collection.stretches(i);
+    if (!first) geojson << ",";
+    first = false;
+    geojson << R"({"type":"Feature","geometry":{"type":"LineString","coordinates":[)";
+    const int n = s.polyline_lat_size();
+    for (int j = 0; j < n; ++j) {
+      if (j > 0) geojson << ",";
+      // GeoJSON ordering is [lon, lat], NOT [lat, lon] — common foot-gun, and
+      // worth a re-read at any future edit.
+      geojson << "[" << s.polyline_lon(j) << "," << s.polyline_lat(j) << "]";
+    }
+    geojson << R"(]},"properties":{)";
+    geojson << R"("stretch_id":)" << s.id()
+            << R"(,"length_km":)" << s.length_km()
+            << R"(,"score":)" << s.score()
+            << R"(,"road_class":)" << s.road_class()
+            << R"(,"mean_sinuosity":)" << s.mean_sinuosity();
+    geojson << "}}";
+  }
+  geojson << "]}\n";
+  if (!geojson) {
+    throw std::runtime_error("Failed to write GeoJSON: " + path.string());
+  }
+}
+
 // Walk all base-level tiles and emit stretches.
 void extract_stretches(const boost::property_tree::ptree& pt,
                        const std::filesystem::path& output_dir) {
@@ -267,6 +318,14 @@ void extract_stretches(const boost::property_tree::ptree& pt,
   }
   LOG_INFO("Wrote " + out_path.string() + " (" +
            std::to_string(collection.stretches_size()) + " stretches).");
+
+  // Slice 7 QA dump: write a GeoJSON FeatureCollection alongside the
+  // protobuf so reviewers can inspect the catalog visually in uMap or QGIS
+  // without writing a custom viewer. See write_geojson for the schema
+  // contract.
+  const auto geojson_path = output_dir / "stretches.geojson";
+  write_geojson(collection, geojson_path);
+  LOG_INFO("Wrote " + geojson_path.string() + " (GeoJSON QA dump).");
 }
 
 } // namespace
