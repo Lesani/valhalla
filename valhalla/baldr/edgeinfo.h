@@ -295,8 +295,9 @@ public:
   int8_t layer() const;
 
   /**
-   * Get the quantized sinuosity of the edge (better_mc_routing v1 extension).
-   * 0 = straight (raw arc/chord 1.0), 255 = raw >= 3.0, linear in between.
+   * Get the quantized sinuosity of the edge (better_mc_routing extension).
+   * 0 = straight / no signal, 255 = maximally curvy. Computed by
+   * baldr::compute_sinuosity_byte (windowed sinuosity + turn density blend).
    * @return sinuosity byte; 0 if the kSinuosity tag is absent.
    */
   uint8_t sinuosity() const;
