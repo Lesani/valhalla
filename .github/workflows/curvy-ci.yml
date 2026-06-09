@@ -1,0 +1,62 @@
+# better_mc_routing fork CI (issue #21): build the patched Valhalla and run
+# the gtest targets covering the curvy-routing code. Trimmed from the
+# upstream linux.yml release job (no sanitizers, no bindings, no packaging,
+# standard actions/cache instead of upstream's self-hosted S3 cache).
+name: Curvy CI
+
+on:
+  push:
+    branches:
+      - feat/curvy-sinuosity
+      - feat/v11-improvements
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: Build & run curvy tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install deps
+        run: ./scripts/install-linux-deps.sh
+
+      - name: Get ccache dir
+        run: echo "CCACHE_DIR=$(ccache --get-config cache_dir)" >> $GITHUB_ENV
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-curvy-linux-x86_64-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            ccache-curvy-linux-x86_64-${{ github.ref_name }}-
+            ccache-curvy-linux-x86_64-
+
+      - name: Configure
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_DATA_TOOLS=ON \
+            -DENABLE_SERVICES=OFF \
+            -DENABLE_PYTHON_BINDINGS=OFF \
+            -DENABLE_NODE_BINDINGS=OFF \
+            -DENABLE_SINGLE_FILES_WERROR=OFF
+
+      - name: Build curvy test targets
+        run: |
+          make -C build -j$(nproc) \
+            sinuosity scenic_cost_helpers directededge attributes_controller \
+            extract_stretches
+
+      - name: Run curvy tests
+        run: |
+          make -C build -j$(nproc) \
+            run-sinuosity run-scenic_cost_helpers run-directededge \
+            run-attributes_controller run-extract_stretches
