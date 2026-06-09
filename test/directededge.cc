@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 using namespace std;
 using namespace valhalla::baldr;
 
@@ -101,6 +103,47 @@ TEST(DirectedEdge, TestMaxSlope) {
 
   edge.set_max_down_slope(-15.7f);
   EXPECT_EQ(edge.max_down_slope(), -16);
+}
+
+// better_mc_routing (issue #20): DirectedEdgeExt now carries the per-edge
+// sinuosity byte in the low 8 bits of the previously unused 64-bit spare.
+
+TEST(DirectedEdgeExt, test_sizeof) {
+  // The ext record must stay exactly one 8-byte word — it is serialized as
+  // a parallel array in the tile.
+  EXPECT_EQ(sizeof(DirectedEdgeExt), 8);
+}
+
+TEST(DirectedEdgeExt, DefaultIsZero) {
+  DirectedEdgeExt ext;
+  EXPECT_EQ(ext.sinuosity(), 0);
+}
+
+TEST(DirectedEdgeExt, SinuosityRoundTrip) {
+  DirectedEdgeExt ext;
+  for (int b : {0, 1, 42, 127, 128, 254, 255}) {
+    ext.set_sinuosity(static_cast<uint8_t>(b));
+    EXPECT_EQ(ext.sinuosity(), b);
+  }
+}
+
+TEST(DirectedEdgeExt, NeighboringBitsUnaffected) {
+  // Setting the sinuosity byte must not bleed into the spare bits: the raw
+  // 64-bit word must equal exactly the byte value (spare stays zero), and
+  // overwriting with a smaller value must clear all 8 bits.
+  DirectedEdgeExt ext;
+  ext.set_sinuosity(255);
+  uint64_t raw;
+  std::memcpy(&raw, &ext, sizeof(raw));
+  EXPECT_EQ(raw, 0xffu);
+
+  ext.set_sinuosity(0x5a);
+  std::memcpy(&raw, &ext, sizeof(raw));
+  EXPECT_EQ(raw, 0x5au);
+
+  ext.set_sinuosity(0);
+  std::memcpy(&raw, &ext, sizeof(raw));
+  EXPECT_EQ(raw, 0u);
 }
 
 } // namespace

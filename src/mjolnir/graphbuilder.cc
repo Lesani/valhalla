@@ -29,6 +29,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <utility>
 
 using namespace valhalla::midgard;
@@ -538,7 +539,10 @@ void BuildTileSet(const std::string& ways_file,
 
   // Lots of times in a given tile we may end up accessing the same
   // shape/attributes twice we avoid doing this by caching it here
-  std::unordered_map<uint32_t, std::pair<double, uint32_t>> geo_attribute_cache;
+  // (length, curvature, sinuosity_byte) per edge info offset. The sinuosity
+  // byte rides along so the reverse directed edge of a way (same EdgeInfo)
+  // gets the same DirectedEdgeExt value without recomputing (issue #20).
+  std::unordered_map<uint32_t, std::tuple<double, uint32_t, uint8_t>> geo_attribute_cache;
 
   std::map<std::pair<uint8_t, uint8_t>, uint32_t> pronunciationMap;
   std::map<std::pair<uint8_t, uint8_t>, uint32_t> langMap;
@@ -929,14 +933,19 @@ void BuildTileSet(const std::string& ways_file,
               tagged_values.push_back(encoded_node_ids);
             }
 
+            // Compute the sinuosity byte once; it is stored both as a
+            // TaggedValue on the EdgeInfo (QA/debug channel, see below) and
+            // in the DirectedEdgeExt record (hot-path channel, issue #20).
+            const uint8_t sinuosity_byte = valhalla::baldr::compute_sinuosity_byte(shape);
+
             // Append sinuosity as a tagged value (better_mc_routing v1).
             // Encoding: 1 tag byte + 1 payload byte. The payload is
             // (raw_byte + 1) clamped to 255 so that raw_byte 0 (straight)
             // is not stored as a null terminator, which would truncate
             // the value at read time. The reader subtracts 1 on lookup.
             {
-              const uint8_t raw = valhalla::baldr::compute_sinuosity_byte(shape);
-              const uint8_t stored = raw == 255 ? 255 : static_cast<uint8_t>(raw + 1);
+              const uint8_t stored =
+                  sinuosity_byte == 255 ? 255 : static_cast<uint8_t>(sinuosity_byte + 1);
               std::string sin_tag;
               sin_tag.reserve(2);
               sin_tag.push_back(static_cast<char>(TaggedValue::kSinuosity));
@@ -967,8 +976,9 @@ void BuildTileSet(const std::string& ways_file,
             // Compute a curvature metric [0-15]. TODO - use resampled polyline?
             uint32_t curvature = compute_curvature(shape);
 
-            // Add the curvature to the cache
-            auto inserted = geo_attribute_cache.insert({edge_info_offset, {length, curvature}});
+            // Add the curvature and sinuosity to the cache
+            auto inserted =
+                geo_attribute_cache.insert({edge_info_offset, {length, curvature, sinuosity_byte}});
             found = inserted.first;
           } // now we have the edge info offset
           else {
@@ -1006,6 +1016,13 @@ void BuildTileSet(const std::string& ways_file,
 
           directededge.set_edgeinfo_offset(found->first);
           directededge.set_curvature(std::get<1>(found->second));
+
+          // Add the parallel extended-attribute record carrying the
+          // sinuosity byte (issue #20). Every directed edge in the tile must
+          // get exactly one ext record or GraphTileBuilder::StoreTileData
+          // drops the whole ext section (size mismatch).
+          DirectedEdgeExt& directededge_ext = graphtile.directededges_ext().emplace_back();
+          directededge_ext.set_sinuosity(std::get<2>(found->second));
 
           // Set use to ramp or turn channel
           if (edge.attributes.turn_channel && use != Use::kConstruction) {

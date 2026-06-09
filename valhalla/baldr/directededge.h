@@ -1309,13 +1309,38 @@ protected:
 
 /**
  * Extended directed edge attribution. This structure provides the ability to add extra
- * attribution per directed edge without breaking backward compatibility. For now this structure
- * is unused.
+ * attribution per directed edge without breaking backward compatibility.
+ *
+ * better_mc_routing (issue #20): carries the per-edge sinuosity byte so the
+ * motorcycle_curvy hot path can read it with plain pointer arithmetic instead
+ * of parsing EdgeInfo tagged values per EdgeCost call.
  */
 class DirectedEdgeExt {
+public:
+  /**
+   * Constructor - zero out the extended attributes.
+   */
+  DirectedEdgeExt();
+
+  /**
+   * Get the quantized sinuosity of the edge (better_mc_routing extension).
+   * 0 = straight / no signal, 255 = maximally curvy. Computed by
+   * baldr::compute_sinuosity_byte (windowed sinuosity + turn density blend).
+   * @return  Returns the sinuosity byte (0-255).
+   */
+  uint8_t sinuosity() const {
+    return sinuosity_;
+  }
+
+  /**
+   * Sets the sinuosity byte (0-255) for the edge.
+   * @param  sinuosity  Quantized sinuosity.
+   */
+  void set_sinuosity(const uint8_t sinuosity);
 
 protected:
-  uint64_t spare0_ : 64;
+  uint64_t sinuosity_ : 8; // Quantized curviness (better_mc_routing)
+  uint64_t spare0_ : 56;
 };
 
 } // namespace baldr

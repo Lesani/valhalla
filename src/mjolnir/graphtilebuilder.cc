@@ -488,8 +488,14 @@ void GraphTileBuilder::Update(const std::vector<NodeInfo>& nodes,
     file.write(reinterpret_cast<const char*>(directededges.data()),
                directededges.size() * sizeof(DirectedEdge));
 
-    // If there are extended directed edge attributes they would need to be written out here
-    // (and likely added to the method)
+    // Write the extended directed edge attributes unchanged (the edge count
+    // cannot change in Update, so the parallel ext array stays valid). Prior
+    // to issue #20 this section was silently dropped, corrupting any tile
+    // with ext data that passed through Update (e.g. in GraphValidator).
+    if (header_->has_ext_directededge()) {
+      file.write(reinterpret_cast<const char*>(ext_directededges_),
+                 header_->directededgecount() * sizeof(DirectedEdgeExt));
+    }
 
     // Write the rest of the tiles
     auto begin = reinterpret_cast<const char*>(&access_restrictions_[0]);

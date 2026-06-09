@@ -29,6 +29,14 @@ using namespace valhalla::mjolnir;
 
 namespace {
 
+// Read the sinuosity byte of a base edge (issue #20): prefer the cheap
+// DirectedEdgeExt field, fall back to the EdgeInfo TaggedValue (QA channel)
+// for tiles built without ext data.
+uint8_t edge_sinuosity(const graph_tile_ptr& tile, const GraphId& edge_id, const DirectedEdge* de) {
+  return tile->header()->has_ext_directededge() ? tile->ext_directededge(edge_id)->sinuosity()
+                                                : tile->edgeinfo(de).sinuosity();
+}
+
 struct ShortcutAccessRestriction {
   std::unordered_map<AccessType, AccessRestriction> all_restrictions;
   // important to set the edge's attribute
@@ -418,8 +426,7 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
       // For length-weighted sinuosity aggregation across all base edges
       // in this shortcut chain (Issue 05).
       std::vector<EdgeSinuosity> base_sinuosity{
-          EdgeSinuosity{newedge.length(),
-                        tile->edgeinfo(directededge).sinuosity()}};
+          EdgeSinuosity{newedge.length(), edge_sinuosity(tile, edge_id, directededge)}};
 
       // For computing weighted density and total turn duration along the shortcut
       uint32_t edge_length = newedge.length();
@@ -485,8 +492,7 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
           graph_tile_ptr next_tile = reader.GetGraphTile(next_edge_id);
           const DirectedEdge* next_de = next_tile->directededge(next_edge_id);
           base_sinuosity.push_back(
-              EdgeSinuosity{next_de->length(),
-                            next_tile->edgeinfo(next_de).sinuosity()});
+              EdgeSinuosity{next_de->length(), edge_sinuosity(next_tile, next_edge_id, next_de)});
         }
 
         // Connect the matching outbound directed edge (updates the next
@@ -513,13 +519,17 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
       uint32_t idx = ((length & 0xfffff) | ((shape.size() & 0xfff) << 20));
 
       // Aggregate sinuosity of all base edges in the shortcut chain (Issue 05)
-      // and emit as a kSinuosity TaggedValue on the shortcut's EdgeInfo.
+      // and emit as a kSinuosity TaggedValue on the shortcut's EdgeInfo
+      // (QA/debug channel) AND into the shortcut's DirectedEdgeExt record
+      // (hot-path channel, issue #20).
       // Payload bias (+1) mirrors graphbuilder.cc — keeps byte 0 from being
       // stored as a null terminator and truncating the value.
+      const uint8_t aggregated_sinuosity = aggregate_shortcut_sinuosity(base_sinuosity);
       std::vector<std::string> shortcut_tagged_values;
       {
-        const uint8_t agg = aggregate_shortcut_sinuosity(base_sinuosity);
-        const uint8_t stored = agg == 255 ? 255 : static_cast<uint8_t>(agg + 1);
+        const uint8_t stored = aggregated_sinuosity == 255
+                                   ? 255
+                                   : static_cast<uint8_t>(aggregated_sinuosity + 1);
         std::string sin_tag;
         sin_tag.reserve(2);
         sin_tag.push_back(static_cast<char>(TaggedValue::kSinuosity));
@@ -616,8 +626,11 @@ std::pair<uint32_t, uint32_t> AddShortcutEdges(GraphReader& reader,
       newedge.set_bridge(has_bridge);
       newedge.set_tunnel(has_tunnel);
 
-      // Add new directed edge to tile builder
+      // Add new directed edge to tile builder, plus its parallel extended
+      // attribute record carrying the aggregated sinuosity (issue #20).
       tilebuilder.directededges().emplace_back(std::move(newedge));
+      DirectedEdgeExt& newedge_ext = tilebuilder.directededges_ext().emplace_back();
+      newedge_ext.set_sinuosity(aggregated_sinuosity);
       shortcut_count++;
       shortcut++;
     }
@@ -760,8 +773,14 @@ std::tuple<uint32_t, uint32_t, uint32_t> FormShortcuts(GraphReader& reader, cons
           newedge.set_superseded(superseded_idx);
         }
 
-        // Add directed edge
+        // Add directed edge and copy its extended attribute record from the
+        // source tile (issue #20) to keep the ext array parallel.
         tilebuilder.directededges().emplace_back(std::move(newedge));
+        DirectedEdgeExt edge_ext;
+        if (tile->header()->has_ext_directededge()) {
+          edge_ext = *tile->ext_directededge(edgeid);
+        }
+        tilebuilder.directededges_ext().emplace_back(edge_ext);
       }
 
       // Set the edge count for the new node

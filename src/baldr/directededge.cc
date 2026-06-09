@@ -678,5 +678,15 @@ void DirectedEdge::json(rapidjson::writer_wrapper_t& writer) const {
   }
 }
 
+// Constructor - zero out the extended attributes.
+DirectedEdgeExt::DirectedEdgeExt() {
+  memset(this, 0, sizeof(DirectedEdgeExt));
+}
+
+// Sets the sinuosity byte (better_mc_routing, issue #20).
+void DirectedEdgeExt::set_sinuosity(const uint8_t sinuosity) {
+  sinuosity_ = sinuosity;
+}
+
 } // namespace baldr
 } // namespace valhalla

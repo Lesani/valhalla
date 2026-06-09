@@ -1,6 +1,5 @@
 #include "sif/motorcyclecost.h"
 #include "baldr/directededge.h"
-#include "baldr/edgeinfo.h"
 #include "baldr/graphconstants.h"
 #include "baldr/nodeinfo.h"
 #include "baldr/rapidjson_utils.h"
@@ -640,7 +639,13 @@ public:
                 const baldr::TimeInfo& time_info,
                 uint8_t& flow_sources) const override {
     Cost base = MotorcycleCost::EdgeCost(edge, edgeid, tile, time_info, flow_sources);
-    const uint8_t sin_byte = tile->edgeinfo(edge).sinuosity();
+    // Issue #20 — hot path: read the sinuosity byte from the DirectedEdgeExt
+    // record (plain pointer arithmetic) instead of tile->edgeinfo(edge),
+    // which re-parses the tagged values (hash map build) per EdgeCost call.
+    // Tiles built without ext data fall back to 0 (= no curvy preference).
+    const uint8_t sin_byte = tile->header()->has_ext_directededge()
+                                 ? tile->ext_directededge(edgeid)->sinuosity()
+                                 : 0;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.

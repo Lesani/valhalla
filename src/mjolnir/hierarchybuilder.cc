@@ -309,6 +309,15 @@ void FormTilesInNewLevel(GraphReader& reader,
 
       // Add directed edge
       tilebuilder->directededges().emplace_back(std::move(newedge));
+
+      // Carry the extended attributes (sinuosity byte) up from the base
+      // level (issue #20). Base tiles without ext data contribute a zeroed
+      // record so the ext array stays parallel to directededges.
+      DirectedEdgeExt edge_ext;
+      if (tile->header()->has_ext_directededge()) {
+        edge_ext = *tile->ext_directededge(base_edge_id);
+      }
+      tilebuilder->directededges_ext().emplace_back(edge_ext);
     }
 
     // Add node transitions
