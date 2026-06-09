@@ -60,6 +60,10 @@ constexpr ranged_default_t<uint32_t> kMotorcycleSpeedRange{10, baldr::kMaxAssume
                                                            baldr::kMaxSpeedKph};
 
 // better_mc_routing v1: motorcycle_curvy option ranges. Clamped silently.
+// NOTE (Issue #18): with the admissible model, alpha now scales a PENALTY on
+// straight edges (factor up to 1 + alpha * kCurvyDetourCap) instead of a
+// discount on curvy ones — the alpha scale changed meaning. The 0.6 default
+// is carried over from v1 and needs recalibration on the Stage-4 harness.
 constexpr float kDefaultCurvyAlpha = 0.6f;
 constexpr ranged_default_t<float> kCurvyAlphaRange{0.0f, kDefaultCurvyAlpha, 0.95f};
 constexpr float kDefaultUseScenicTolls = 0.5f;
@@ -637,10 +641,13 @@ public:
                 uint8_t& flow_sources) const override {
     Cost base = MotorcycleCost::EdgeCost(edge, edgeid, tile, time_info, flow_sources);
     const uint8_t sin_byte = tile->edgeinfo(edge).sinuosity();
-    const float bonus = curvy_alpha_ > 0.0f ? curvy_bonus(sin_byte, curvy_alpha_) : 1.0f;
+    // Issue #18 — admissible cost model: every factor below is >= 1.0, so
+    // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
+    // the A* heuristic calibrated against base costs stays admissible.
+    const float sp = straightness_penalty(sin_byte, curvy_alpha_);
     const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
     const float tm = toll_multiplier(edge->toll(), edge->classification(), use_scenic_tolls_);
-    return Cost(base.cost * bonus * cm * tm, base.secs);
+    return Cost(base.cost * sp * cm * tm, base.secs);
   }
 
 protected:
