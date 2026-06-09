@@ -175,6 +175,9 @@ void serialize_edges(const AttributesController& controller,
       if (controller(kEdgeCurvature)) {
         writer("curvature", static_cast<uint64_t>(edge.curvature()));
       }
+      if (controller(kEdgeSinuosity)) {
+        writer("sinuosity", static_cast<uint64_t>(edge.sinuosity()));
+      }
       if (controller(kEdgeDriveOnRight)) {
         writer("drive_on_right", static_cast<bool>(!edge.drive_on_left()));
       }
