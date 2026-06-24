@@ -643,7 +643,12 @@ public:
     // record (plain pointer arithmetic) instead of tile->edgeinfo(edge),
     // which re-parses the tagged values (hash map build) per EdgeCost call.
     // Tiles built without ext data fall back to 0 (= no curvy preference).
-    const uint8_t sin_byte = tile->header()->has_ext_directededge()
+    // An invalid edgeid (PartialEdgeCost passes GraphId(kInvalidGraphId)
+    // during Loki location snapping, deliberately, to skip the whole-edge
+    // factor) must also fall back to 0 — ext_directededge() would otherwise
+    // throw on the out-of-range sentinel index. Snapping wants the neutral
+    // (straight) cost anyway.
+    const uint8_t sin_byte = (edgeid.is_valid() && tile->header()->has_ext_directededge())
                                  ? tile->ext_directededge(edgeid)->sinuosity()
                                  : 0;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
