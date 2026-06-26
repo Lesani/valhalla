@@ -104,7 +104,10 @@ inline float curve_density(const ShapeCurve& c) {
 // up to kMaxStraightRunMeters so hairpin-straight-hairpin chains stay together.
 inline constexpr float kSeedCurveDensity = 0.18f;  // start on a clearly curvy edge
 inline constexpr float kGrowCurveDensity = 0.05f;  // below this an edge is "straight"
-inline constexpr float kEmitCurveDensity = 0.15f;  // emitted stretch must clear this
+// Emitted-stretch floor: the INDEX is curated highlights (passes + good twisty
+// roads, density >= ~0.30); pleasant low-curve background Landstraßen are the
+// COSTING's job, not the highlight index. Overridable via the -d CLI flag.
+inline constexpr float kEmitCurveDensity = 0.30f;
 inline constexpr float kMaxStraightRunMeters = 2400.0f; // ~1.5 mi straight ends a stretch
 
 // Quantization-byte thresholds for the growth rules. The PRD specifies the
@@ -122,7 +125,7 @@ inline constexpr uint8_t kGrowSinuosityByte = 76;
 // Length filter window for emitted stretches. Stretches whose total length
 // falls outside [1 km, 20 km] are dropped; long ones are split at the
 // lowest-sinuosity interior break point and re-checked.
-inline constexpr float kMinStretchKm = 1.0f;
+inline constexpr float kMinStretchKm = 3.0f;  // highlights are substantial roads
 inline constexpr float kMaxStretchKm = 20.0f;
 
 // Straight-blip tolerance: inside an otherwise-curvy stretch we tolerate
@@ -345,7 +348,8 @@ inline bool passes_emit_filters(std::span<const EdgeCandidate> edges) {
 //   2. If in band — emit one.
 //   3. If too long — split at lowest interior sinuosity, recurse on halves.
 inline std::vector<EmittedStretch>
-emit_with_splits(std::span<const EdgeCandidate> edges) {
+emit_with_splits(std::span<const EdgeCandidate> edges,
+                 float min_density = kEmitCurveDensity) {
   std::vector<EmittedStretch> out;
   const float km = total_length_m(edges) / 1000.0f;
   if (km < kMinStretchKm) {
@@ -354,7 +358,7 @@ emit_with_splits(std::span<const EdgeCandidate> edges) {
   // v3: the run must clear the curve-density floor to be a scenic stretch.
   // grow_forward already bounded straights (<= kMaxStraightRunMeters), so a run
   // that still falls below the floor is genuinely not curvy enough — drop it.
-  if (stretch_curve_density(edges) < kEmitCurveDensity) {
+  if (stretch_curve_density(edges) < min_density) {
     return out;
   }
   if (km <= kMaxStretchKm) {
@@ -373,11 +377,11 @@ emit_with_splits(std::span<const EdgeCandidate> edges) {
   // Long stretch: split at the lowest-sinuosity INTERIOR edge and recurse.
   auto [a, b] = split_at_lowest_sinuosity(edges);
   if (!a.empty()) {
-    auto sub_a = emit_with_splits(std::span<const EdgeCandidate>(a));
+    auto sub_a = emit_with_splits(std::span<const EdgeCandidate>(a), min_density);
     out.insert(out.end(), sub_a.begin(), sub_a.end());
   }
   if (!b.empty()) {
-    auto sub_b = emit_with_splits(std::span<const EdgeCandidate>(b));
+    auto sub_b = emit_with_splits(std::span<const EdgeCandidate>(b), min_density);
     out.insert(out.end(), sub_b.begin(), sub_b.end());
   }
   return out;

@@ -81,7 +81,7 @@ TEST(StretchExtractor, SeedAndGrowThresholdsMatchPRD) {
 }
 
 TEST(StretchExtractor, LengthBandFromPRD) {
-  EXPECT_FLOAT_EQ(kMinStretchKm, 1.0f);
+  EXPECT_FLOAT_EQ(kMinStretchKm, 3.0f); // v3: highlights are substantial roads
   EXPECT_FLOAT_EQ(kMaxStretchKm, 20.0f);
 }
 
@@ -241,9 +241,9 @@ TEST(StretchExtractor, EmitMostlyStraightRunDropsBelowDensityFloor) {
 TEST(StretchExtractor, EmitCurvyRunWithShortStraightStillEmits) {
   // v3: a genuinely curvy run keeps a short straight without being dropped
   // (density stays above the floor) — the hairpins-with-straights case.
-  std::vector<EdgeCandidate> edges{make_edge(1000, 200), make_edge(300, 30),
-                                   make_edge(1000, 200)};
-  // density = 0.6*2000 / 2300 = 0.52 >> 0.15 floor.
+  std::vector<EdgeCandidate> edges{make_edge(2000, 200), make_edge(300, 30),
+                                   make_edge(2000, 200)};
+  // 4.3 km (>= 3 km floor); density = 0.6*4000 / 4300 = 0.56 >> floor.
   auto out = emit_with_splits(edges);
   ASSERT_EQ(out.size(), 1u);
 }

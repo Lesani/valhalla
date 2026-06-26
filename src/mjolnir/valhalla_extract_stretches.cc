@@ -125,7 +125,8 @@ GraphId next_edge_in_chain(GraphReader& reader,
     if (de->roundabout()) continue;
     if (de->classification() != anchor_class) continue;
     if (static_cast<uint8_t>(de->surface()) != anchor_surface) continue;
-    if (de->access_restriction() != 0) continue;
+    // (No access_restriction skip — keep toll/seasonal alpine passes intact;
+    //  see the seed loop note.)
     // Found one. Stop counting at 2 to keep this O(1) per node.
     if (++found > 1) {
       return {};
@@ -254,7 +255,8 @@ void write_geojson(const valhalla::StretchCollection& collection,
 
 // Walk all base-level tiles and emit stretches.
 void extract_stretches(const boost::property_tree::ptree& pt,
-                       const std::filesystem::path& output_dir) {
+                       const std::filesystem::path& output_dir,
+                       float min_density) {
   GraphReader reader(pt.get_child("mjolnir"));
 
   // Walk EVERY hierarchy level (0 highway, 1 arterial, 2 local), not just the
@@ -302,8 +304,23 @@ void extract_stretches(const boost::property_tree::ptree& pt,
         if (de->shortcut()) continue;
         if (!de->forward()) continue; // visit each pair once
         if (de->roundabout()) continue;
-        if (de->access_restriction() != 0) continue;
+        // NOTE: we do NOT skip access_restriction != 0 here. Toll and SEASONAL
+        // restrictions (winter closure) flag exactly the great alpine passes —
+        // Stelvio, Großglockner, Timmelsjoch — which are THE scenic highlights.
+        // The routing costing decides actual access at route time; the index
+        // just catalogs scenic roads. use==kRoad (below) already excludes paths.
         if (de->classification() == RoadClass::kInvalid) continue;
+        // The scenic-HIGHLIGHT index is real roads only — exclude tracks, paths,
+        // driveways, cycleways etc. (they dominate the curvy-segment count: forest
+        // switchback tracks). Adventure/gravel preference is the costing's job.
+        switch (de->use()) {
+          case Use::kRoad:
+          case Use::kLivingStreet:
+          case Use::kTurnChannel:
+            break;
+          default:
+            continue;
+        }
 
         if (visited.count(edge_id.value)) continue;
 
@@ -318,7 +335,8 @@ void extract_stretches(const boost::property_tree::ptree& pt,
         auto chain = grow_forward(reader, tile, edge_id, visited);
         if (chain.empty()) continue;
 
-        auto stretches = emit_with_splits(std::span<const EdgeCandidate>(chain));
+        auto stretches =
+            emit_with_splits(std::span<const EdgeCandidate>(chain), min_density);
         for (const auto& s : stretches) {
           auto* msg = collection.add_stretches();
           msg->set_id(next_id++);
@@ -369,6 +387,7 @@ int main(int argc, char** argv) {
   const auto program = std::filesystem::path(__FILE__).stem().string();
   boost::property_tree::ptree config;
   std::string output_dir_str;
+  double min_density = valhalla::mjolnir::kEmitCurveDensity;
 
   try {
     // clang-format off
@@ -384,7 +403,10 @@ int main(int argc, char** argv) {
       ("c,config", "Path to the json configuration file.", cxxopts::value<std::string>())
       ("i,inline-config", "Inline JSON config", cxxopts::value<std::string>())
       ("o,output-dir", "Output directory for stretches.bin",
-        cxxopts::value<std::string>(output_dir_str)->default_value("."));
+        cxxopts::value<std::string>(output_dir_str)->default_value("."))
+      ("d,min-density", "Minimum curve density for an emitted scenic stretch "
+        "(0 straight .. ~1+ hairpins; default curated-highlights floor).",
+        cxxopts::value<double>(min_density));
     // clang-format on
 
     auto result = options.parse(argc, argv);
@@ -399,7 +421,8 @@ int main(int argc, char** argv) {
   }
 
   try {
-    extract_stretches(config, std::filesystem::path(output_dir_str));
+    extract_stretches(config, std::filesystem::path(output_dir_str),
+                      static_cast<float>(min_density));
   } catch (std::exception& e) {
     std::cerr << "extract_stretches failed: " << e.what() << std::endl;
     return EXIT_FAILURE;
