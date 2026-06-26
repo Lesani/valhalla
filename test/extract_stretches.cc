@@ -265,6 +265,21 @@ TEST(StretchExtractor, EmitDoubleSplitWorks) {
   }
 }
 
+TEST(StretchExtractor, EmitSingleOverlongEdgeDropsNoInfiniteRecursion) {
+  // A single curvy edge longer than the 20 km max. It can't be split (split
+  // needs >= 3 edges), so it must be dropped — not recursed on forever.
+  // Regression: this used to overflow the stack on the Europe tileset.
+  std::vector<EdgeCandidate> edges{make_edge(25000, 200)};
+  EXPECT_TRUE(emit_with_splits(edges).empty());
+}
+
+TEST(StretchExtractor, EmitTwoOverlongEdgesDropsNoInfiniteRecursion) {
+  // Two curvy edges, together over the max and each too coarse to split.
+  // Same unsplittable-but-overlong case (size < 3) — must drop, not hang.
+  std::vector<EdgeCandidate> edges{make_edge(15000, 200), make_edge(15000, 190)};
+  EXPECT_TRUE(emit_with_splits(edges).empty());
+}
+
 // ---- passes_emit_filters ----
 
 TEST(StretchExtractor, PassesEmitFiltersHappyPath) {

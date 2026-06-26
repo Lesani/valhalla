@@ -248,6 +248,15 @@ emit_with_splits(std::span<const EdgeCandidate> edges) {
     out.push_back(finalize(edges));
     return out;
   }
+  // Over the max length we can only get into band by splitting, and
+  // split_at_lowest_sinuosity needs >= 3 edges to break the run (for shorter
+  // runs it returns {original, empty}). A 1- or 2-edge run longer than the max
+  // is therefore unsplittable and out of band — drop it. Without this guard
+  // the recursion below re-enters on the *unchanged* span forever and blows
+  // the stack: a single >20 km curvy edge does occur in the Europe tileset.
+  if (edges.size() < 3) {
+    return out;
+  }
   // Long stretch: split at the lowest-sinuosity INTERIOR edge and recurse.
   auto [a, b] = split_at_lowest_sinuosity(edges);
   if (!a.empty()) {
