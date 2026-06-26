@@ -80,6 +80,10 @@ EdgeCandidate make_candidate(const GraphTile& tile, const DirectedEdge* de) {
   // attached. We don't sub-filter — anything restricted is a hard stop.
   c.restricted_access = de->access_restriction() != 0;
   c.shape = get_edge_shape(tile, de);
+  // v3 curve metric (Menger radius-binning) computed from the edge shape.
+  const ShapeCurve sc = compute_shape_curve(c.shape);
+  c.curvy_m = sc.curvy_m;
+  c.max_straight_m = sc.max_straight_m;
   return c;
 }
 
@@ -147,27 +151,40 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
   graph_tile_ptr cur_tile = seed_tile;
   const DirectedEdge* cur_de = seed_de;
 
-  uint32_t straight_count = 0;
-  uint32_t straight_meters = 0;
+  // v3 straight-tolerance: grow THROUGH straights (so hairpins separated by
+  // short straights stay one stretch), but a continuous straight run longer
+  // than kMaxStraightRunMeters ends the stretch — and the trailing straight
+  // edges are dropped so the stretch doesn't carry a long boring tail.
+  float continuous_straight = 0.0f;
+  int trailing_straight_edges = 0;
 
   while (true) {
     if (visited.count(cur_edge_id.value)) break;
     visited.insert(cur_edge_id.value);
     chain.push_back(make_candidate(*cur_tile, cur_de));
 
-    // For non-seed edges, decide whether the straight-blip budget is busted.
-    // (The seed itself passed the seed test, so it's never a blip.)
     if (chain.size() > 1) {
       const auto& last = chain.back();
-      if (last.sinuosity_byte < kGrowSinuosityByte) {
-        straight_count++;
-        straight_meters += last.length_m;
-        if (straight_count > kMaxStraightBlipCount ||
-            straight_meters > kMaxStraightBlipMeters) {
-          // Drop this last edge — it busted the budget.
-          chain.pop_back();
+      // A single edge with a long internal straight ends the stretch too.
+      if (last.max_straight_m > kMaxStraightRunMeters) {
+        chain.pop_back();
+        break;
+      }
+      const float density =
+          last.length_m > 0 ? last.curvy_m / static_cast<float>(last.length_m) : 0.0f;
+      if (density < kGrowCurveDensity) {
+        continuous_straight += static_cast<float>(last.length_m);
+        trailing_straight_edges++;
+        if (continuous_straight > kMaxStraightRunMeters) {
+          // Drop the trailing straight run and stop.
+          for (int i = 0; i < trailing_straight_edges && !chain.empty(); ++i) {
+            chain.pop_back();
+          }
           break;
         }
+      } else {
+        continuous_straight = 0.0f;
+        trailing_straight_edges = 0;
       }
     }
 
@@ -240,9 +257,15 @@ void extract_stretches(const boost::property_tree::ptree& pt,
                        const std::filesystem::path& output_dir) {
   GraphReader reader(pt.get_child("mjolnir"));
 
-  // We extract only on the most-detailed (last) hierarchy level — base roads.
+  // Walk EVERY hierarchy level (0 highway, 1 arterial, 2 local), not just the
+  // base level. Each road class lives on exactly one level (TileHierarchy::
+  // get_level), so this captures primary/secondary/tertiary scenic roads — the
+  // bulk of good motorcycle roads — which the base level alone misses (it only
+  // holds unclassified/residential/service/track, ~90% of which are gravel
+  // tracks). Shortcut edges on levels 0/1 are skipped in the seed test below;
+  // sinuosity is carried up to all levels by hierarchybuilder, so the seed
+  // test works everywhere.
   const auto& levels = TileHierarchy::levels();
-  const uint8_t base_level = levels.back().level;
 
   // Visited set: one entry per directed-edge GraphId we've already pulled into
   // a chain. Stops re-walking.
@@ -251,14 +274,15 @@ void extract_stretches(const boost::property_tree::ptree& pt,
 
   valhalla::StretchCollection collection;
   uint32_t next_id = 0;
-
-  const auto& tiles = levels.back().tiles;
   uint32_t tile_count = 0;
   uint32_t seed_count = 0;
   uint32_t emitted_count = 0;
 
-  for (uint32_t tile_index = 0; tile_index < tiles.TileCount(); ++tile_index) {
-    GraphId tile_id(tile_index, base_level, 0);
+  for (const auto& level : levels) {
+   const uint8_t cur_level = level.level;
+   const auto& tiles = level.tiles;
+   for (uint32_t tile_index = 0; tile_index < tiles.TileCount(); ++tile_index) {
+    GraphId tile_id(tile_index, cur_level, 0);
     if (!reader.DoesTileExist(tile_id)) continue;
     graph_tile_ptr tile = reader.GetGraphTile(tile_id);
     if (!tile) continue;
@@ -271,7 +295,7 @@ void extract_stretches(const boost::property_tree::ptree& pt,
       const uint32_t base_idx = node->edge_index();
       for (uint32_t i = 0; i < node->edge_count(); ++i) {
         const uint32_t local_idx = base_idx + i;
-        GraphId edge_id(tile_id.tileid(), base_level, local_idx);
+        GraphId edge_id(tile_id.tileid(), cur_level, local_idx);
         const DirectedEdge* de = tile->directededge(local_idx);
 
         // Seed eligibility checks.
@@ -281,10 +305,14 @@ void extract_stretches(const boost::property_tree::ptree& pt,
         if (de->access_restriction() != 0) continue;
         if (de->classification() == RoadClass::kInvalid) continue;
 
-        const uint8_t byte = tile->edgeinfo(de).sinuosity();
-        if (byte < kSeedSinuosityByte) continue;
-
         if (visited.count(edge_id.value)) continue;
+
+        // v3 seed gate: the edge must be clearly curvy by the Menger curve
+        // metric (per-edge sinuosity missed real roads — hairpins separated by
+        // straights average to ~0). Compute from the edge shape.
+        const ShapeCurve seed_curve = compute_shape_curve(get_edge_shape(*tile, de));
+        if (curve_density(seed_curve) < kSeedCurveDensity) continue;
+
         seed_count++;
 
         auto chain = grow_forward(reader, tile, edge_id, visited);
@@ -307,6 +335,7 @@ void extract_stretches(const boost::property_tree::ptree& pt,
         }
       }
     }
+   }
   }
 
   LOG_INFO("extract_stretches: scanned " + std::to_string(tile_count) +

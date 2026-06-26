@@ -57,6 +57,11 @@ EdgeCandidate make_edge(uint32_t length_m,
   e.road_class = cls;
   e.use = Use::kRoad;
   e.surface = surface;
+  // v3: synthesize a curve density from the legacy sinuosity byte so these
+  // synthetic edges read as curvy (byte >= grow threshold -> density 0.6) or
+  // straight (below -> 0, and the whole edge counts as a straight run).
+  e.curvy_m = sinuosity_byte >= 76 ? 0.6f * static_cast<float>(length_m) : 0.0f;
+  e.max_straight_m = sinuosity_byte < 76 ? static_cast<float>(length_m) : 0.0f;
   e.roundabout = false;
   e.restricted_access = false;
   if (lat0 == lat1 && lon0 == lon1) {
@@ -223,19 +228,24 @@ TEST(StretchExtractor, EmitInBandProducesOneStretch) {
   EXPECT_GT(out[0].score, 0.0f);
 }
 
-TEST(StretchExtractor, EmitTooManyBlipsDrops) {
-  // 4 km total, two below-grow blips that exceed the count budget (1).
-  std::vector<EdgeCandidate> edges{make_edge(1000, 200), make_edge(100, 30),
-                                   make_edge(1000, 180), make_edge(100, 30),
-                                   make_edge(1000, 200)};
+TEST(StretchExtractor, EmitMostlyStraightRunDropsBelowDensityFloor) {
+  // v3: a run that is mostly straight (one short curvy edge among long straights)
+  // has curve density below kEmitCurveDensity -> dropped. (Replaces the old
+  // blip-count tests; the curve-density floor subsumes the blip budget.)
+  std::vector<EdgeCandidate> edges{make_edge(200, 200), make_edge(2000, 30),
+                                   make_edge(2000, 30)};
+  // density = 0.6*200 / 4200 = 0.029 < 0.15 floor.
   EXPECT_TRUE(emit_with_splits(edges).empty());
 }
 
-TEST(StretchExtractor, EmitBlipTooLongDrops) {
-  // 4 km total, ONE blip but it's longer than 200 m.
+TEST(StretchExtractor, EmitCurvyRunWithShortStraightStillEmits) {
+  // v3: a genuinely curvy run keeps a short straight without being dropped
+  // (density stays above the floor) — the hairpins-with-straights case.
   std::vector<EdgeCandidate> edges{make_edge(1000, 200), make_edge(300, 30),
                                    make_edge(1000, 200)};
-  EXPECT_TRUE(emit_with_splits(edges).empty());
+  // density = 0.6*2000 / 2300 = 0.52 >> 0.15 floor.
+  auto out = emit_with_splits(edges);
+  ASSERT_EQ(out.size(), 1u);
 }
 
 TEST(StretchExtractor, EmitLongRunGetsSplit) {
@@ -365,8 +375,10 @@ TEST(StretchExtractor, FinalizeProducesRightShapeForOneEdge) {
   auto s = finalize(edges);
   EXPECT_FLOAT_EQ(s.length_km, 1.5f);
   EXPECT_EQ(s.road_class, RoadClass::kSecondary);
+  // v3: score is the curve density (~0.6 for a fully-curvy synthetic edge);
+  // mean_sinuosity_raw is repurposed to carry the same density into the QA dump.
   EXPECT_GT(s.score, 0.0f);
-  EXPECT_GT(s.mean_sinuosity_raw, 1.0f);
+  EXPECT_FLOAT_EQ(s.mean_sinuosity_raw, s.score);
 }
 
 TEST(StretchExtractor, FinalizeRoadClassFromFirstEdge) {

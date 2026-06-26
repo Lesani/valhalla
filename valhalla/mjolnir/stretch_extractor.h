@@ -216,6 +216,18 @@ inline uint32_t total_length_m(std::span<const EdgeCandidate> edges) {
   return sum;
 }
 
+// Curve density of a whole stretch = sum(curvy_m) / sum(length_m). This is the
+// v3 scenic-attractiveness base signal (replaces mean sinuosity).
+inline float stretch_curve_density(std::span<const EdgeCandidate> edges) {
+  float curvy = 0.0f;
+  uint32_t len = 0;
+  for (const auto& e : edges) {
+    curvy += e.curvy_m;
+    len += e.length_m;
+  }
+  return len > 0 ? curvy / static_cast<float>(len) : 0.0f;
+}
+
 // Helper: count below-grow-threshold "straight blip" edges and their total length.
 struct BlipStats {
   uint32_t count{0};
@@ -297,11 +309,14 @@ concatenate_shapes(std::span<const EdgeCandidate> edges) {
 inline EmittedStretch finalize(std::span<const EdgeCandidate> edges) {
   EmittedStretch out;
   if (edges.empty()) return out;
-  const float mean_byte = length_weighted_mean_sinuosity_byte(edges);
   out.length_km = total_length_m(edges) / 1000.0f;
-  out.mean_sinuosity_raw = byte_to_raw_sinuosity(mean_byte);
+  // v3: score = curve density (Menger radius-binning). road_class + surface are
+  // carried on the stretch so the picker/costing apply class/surface weighting.
+  // mean_sinuosity_raw is repurposed to carry the curve density into the QA dump.
+  const float density = stretch_curve_density(edges);
+  out.mean_sinuosity_raw = density;
   out.road_class = edges.front().road_class;
-  out.score = compute_score(mean_byte, out.road_class);
+  out.score = density;
   out.polyline = concatenate_shapes(edges);
   uint8_t worst = 0;
   for (const auto& e : edges) {
@@ -318,9 +333,9 @@ inline bool passes_emit_filters(std::span<const EdgeCandidate> edges) {
   if (edges.empty()) return false;
   const float km = total_length_m(edges) / 1000.0f;
   if (km < kMinStretchKm || km > kMaxStretchKm) return false;
-  const BlipStats s = blip_stats(edges);
-  if (s.count > kMaxStraightBlipCount) return false;
-  if (s.total_meters > kMaxStraightBlipMeters) return false;
+  // v3: the stretch as a whole must clear the curve-density floor (a pleasant
+  // rural Landstraße ~0.20; straight controls ~0.10).
+  if (stretch_curve_density(edges) < kEmitCurveDensity) return false;
   return true;
 }
 
@@ -336,10 +351,10 @@ emit_with_splits(std::span<const EdgeCandidate> edges) {
   if (km < kMinStretchKm) {
     return out;
   }
-  // Blip filter applies to the WHOLE run as-emitted; if violated, we drop
-  // rather than split (the run is too noisy to be a clean stretch).
-  const BlipStats s = blip_stats(edges);
-  if (s.count > kMaxStraightBlipCount || s.total_meters > kMaxStraightBlipMeters) {
+  // v3: the run must clear the curve-density floor to be a scenic stretch.
+  // grow_forward already bounded straights (<= kMaxStraightRunMeters), so a run
+  // that still falls below the floor is genuinely not curvy enough — drop it.
+  if (stretch_curve_density(edges) < kEmitCurveDensity) {
     return out;
   }
   if (km <= kMaxStretchKm) {
