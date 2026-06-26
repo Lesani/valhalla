@@ -42,13 +42,19 @@ TEST(StraightnessPenalty, AlphaZeroDisablesPenalty) {
 }
 
 TEST(StraightnessPenalty, MonotonicallyDecreasingInByte) {
-  // Strictly decreasing in sinuosity_byte for fixed alpha > 0: the curvier
-  // the edge, the cheaper it is (down to base cost at byte 255).
+  // v3: non-increasing in the curve-density byte for fixed alpha > 0 (the
+  // curvier, the cheaper), STRICTLY decreasing up to kCurveDensityFullByte and
+  // then flat at base cost (1.0) for any byte >= it (fully-curvy plateau).
   const float alpha = 0.5f;
+  const int full = static_cast<int>(valhalla::sif::kCurveDensityFullByte);
   float prev = straightness_penalty(0, alpha);
   for (int b = 1; b <= 255; ++b) {
     const float current = straightness_penalty(static_cast<uint8_t>(b), alpha);
-    EXPECT_LT(current, prev) << "byte=" << b;
+    if (b <= full) {
+      EXPECT_LT(current, prev) << "byte=" << b;
+    } else {
+      EXPECT_FLOAT_EQ(current, 1.0f) << "byte=" << b;
+    }
     prev = current;
   }
 }

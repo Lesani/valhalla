@@ -14,6 +14,13 @@ namespace sif {
 // a dead-straight edge costs (1 + kCurvyDetourCap)x its base cost.
 inline constexpr float kCurvyDetourCap = 1.5f;
 
+// v3: the per-edge byte now carries CURVE DENSITY * 100 (Menger radius-binning),
+// not the legacy 0..255 sinuosity. An edge that is entirely within a curve has
+// density ~1.0 (byte ~100); tight hairpins reach ~2.0 (byte ~200). So "fully
+// curvy, zero penalty" is reached at byte kCurveDensityFullByte, not 255. Tune
+// against the rebuilt tiles.
+inline constexpr float kCurveDensityFullByte = 120.0f;
+
 /**
  * Multiplicative cost PENALTY for straight edges (better_mc_routing v1.1,
  * Issue #18 — admissible cost model).
@@ -38,7 +45,10 @@ inline constexpr float kCurvyDetourCap = 1.5f;
  * Pure function — no globals, no allocations — directly unit-testable.
  */
 inline float straightness_penalty(uint8_t sinuosity_byte, float alpha, float k = kCurvyDetourCap) {
-  const float s = sinuosity_byte / 255.0f;
+  // v3: normalize the curve-density byte by kCurveDensityFullByte (not 255), so
+  // a genuinely curvy edge reaches s=1.0 (no penalty) and only straighter edges
+  // pay more. (Var/param name kept as `sinuosity_byte` for minimal churn.)
+  const float s = std::min(1.0f, sinuosity_byte / kCurveDensityFullByte);
   return 1.0f + alpha * k * (1.0f - s); // curviest edge = base cost; dead straight = (1+αk)×
 }
 
