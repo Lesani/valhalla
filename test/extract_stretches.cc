@@ -33,6 +33,10 @@ using valhalla::mjolnir::passes_emit_filters;
 using valhalla::mjolnir::split_at_lowest_sinuosity;
 using valhalla::mjolnir::total_length_m;
 using valhalla::midgard::PointLL;
+using valhalla::mjolnir::compute_shape_curve;
+using valhalla::mjolnir::curve_circumradius;
+using valhalla::mjolnir::curve_density;
+using valhalla::mjolnir::curve_weight_for_radius;
 using valhalla::sif::ClassMultipliers;
 
 namespace {
@@ -292,6 +296,48 @@ TEST(StretchExtractor, FinalizeRecordsWorstSurface) {
   auto out = emit_with_splits(edges);
   ASSERT_EQ(out.size(), 1u);
   EXPECT_EQ(out[0].surface, 2);
+}
+
+// ---- curve metric (Menger radius-binning) ----
+
+TEST(StretchExtractor, CurveWeightBins) {
+  EXPECT_FLOAT_EQ(curve_weight_for_radius(20.0), 2.0f);
+  EXPECT_FLOAT_EQ(curve_weight_for_radius(45.0), 1.6f);
+  EXPECT_FLOAT_EQ(curve_weight_for_radius(80.0), 1.3f);
+  EXPECT_FLOAT_EQ(curve_weight_for_radius(150.0), 1.0f);
+  EXPECT_FLOAT_EQ(curve_weight_for_radius(500.0), 0.0f);
+}
+
+TEST(StretchExtractor, CircumradiusCollinearIsInfinite) {
+  // Degenerate triangle (a straight line) -> infinite radius.
+  EXPECT_TRUE(std::isinf(curve_circumradius(100.0, 100.0, 200.0)));
+}
+
+TEST(StretchExtractor, CurveMetricStraightIsZero) {
+  std::vector<PointLL> line;
+  for (int i = 0; i < 12; ++i) {
+    line.emplace_back(11.0 + i * 0.001, 47.0); // due east, perfectly straight
+  }
+  auto c = compute_shape_curve(line);
+  EXPECT_GT(c.length_m, 0.0f);
+  EXPECT_NEAR(c.curvy_m, 0.0f, 1.0f);
+  EXPECT_LT(curve_density(c), 0.01f);
+  EXPECT_GT(c.max_straight_m, 0.0f);
+}
+
+TEST(StretchExtractor, CurveMetricTightArcScoresHigh) {
+  // Points on a ~50 m radius half-circle -> circumradius ~50 m -> weight 1.6.
+  const double R = 50.0, lat0 = 47.0, lon0 = 11.0;
+  const double mlat = 111320.0, mlon = 111320.0 * std::cos(lat0 * 3.14159265358979 / 180.0);
+  std::vector<PointLL> arc;
+  for (int i = 0; i <= 24; ++i) {
+    const double th = 3.14159265358979 * i / 24.0;
+    arc.emplace_back(lon0 + (R / mlon) * std::sin(th),
+                     lat0 + (R / mlat) * (1.0 - std::cos(th)));
+  }
+  auto c = compute_shape_curve(arc);
+  EXPECT_GT(curve_density(c), 1.0f);     // tight curve -> high density
+  EXPECT_NEAR(c.max_straight_m, 0.0f, 1.0f);
 }
 
 // ---- passes_emit_filters ----

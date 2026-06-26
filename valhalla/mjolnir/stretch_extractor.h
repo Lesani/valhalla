@@ -7,7 +7,9 @@
 // binary at src/mjolnir/valhalla_extract_stretches.cc is the I/O wrapper.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -17,6 +19,93 @@
 
 namespace valhalla {
 namespace mjolnir {
+
+// ---------------------------------------------------------------------------
+// Curve metric (Menger curvature / radius-binning) — the v3 "what is a scenic
+// road" signal, replacing per-edge arc/chord sinuosity. Adapted from Adam
+// Franco's open-source roadcurvature project (roadcurvature.com): the local
+// curve radius at each interior shape point is the circumradius of the triangle
+// formed by it and its two neighbours; each segment is weighted by a
+// radius-bin, and the weighted length summed gives "metres spent in turns".
+// Per-edge sinuosity was blind to real roads (hairpins separated by straights
+// average to ~0); curve density + a straight-tolerance fixes that.
+// ---------------------------------------------------------------------------
+
+// Curve-radius bins (metres) -> weight; tighter curve counts more.
+inline float curve_weight_for_radius(double radius_m) {
+  if (radius_m < 30.0) return 2.0f;
+  if (radius_m < 60.0) return 1.6f;
+  if (radius_m < 100.0) return 1.3f;
+  if (radius_m < 175.0) return 1.0f;
+  return 0.0f; // >= 175 m counts as straight
+}
+
+// Menger circumradius from three geodesic side lengths (a,b,c). Returns +inf
+// for a degenerate (collinear) triple — i.e. a straight, infinite-radius curve.
+inline double curve_circumradius(double a, double b, double c) {
+  const double d =
+      std::sqrt(std::fabs((a + b + c) * (b + c - a) * (c + a - b) * (a + b - c)));
+  return d == 0.0 ? std::numeric_limits<double>::infinity() : (a * b * c) / d;
+}
+
+// Curve metric of a polyline shape.
+struct ShapeCurve {
+  float curvy_m{0.0f};        // sum of segment_length * radius-bin weight
+  float length_m{0.0f};       // total geodesic length
+  float max_straight_m{0.0f}; // longest continuous weight-0 (straight) run
+};
+
+// Compute the curve metric of a shape. For each interior point the circumradius
+// of (prev, this, next) is the local curve radius; it applies to the two
+// segments around the point and the SMALLER of two competing radii wins.
+inline ShapeCurve compute_shape_curve(const std::vector<midgard::PointLL>& shape) {
+  ShapeCurve out;
+  const size_t n = shape.size();
+  if (n < 2) {
+    return out;
+  }
+  std::vector<double> seglen(n - 1);
+  for (size_t i = 0; i + 1 < n; ++i) {
+    seglen[i] = shape[i].Distance(shape[i + 1]);
+  }
+  std::vector<double> segrad(n - 1, std::numeric_limits<double>::infinity());
+  for (size_t i = 1; i + 1 < n; ++i) {
+    const double base = shape[i - 1].Distance(shape[i + 1]);
+    const double r = curve_circumradius(seglen[i - 1], seglen[i], base);
+    segrad[i - 1] = std::min(segrad[i - 1], r);
+    segrad[i] = std::min(segrad[i], r);
+  }
+  double run = 0.0;
+  for (size_t i = 0; i + 1 < n; ++i) {
+    out.length_m += static_cast<float>(seglen[i]);
+    const float w = curve_weight_for_radius(segrad[i]);
+    out.curvy_m += static_cast<float>(seglen[i] * w);
+    if (w == 0.0f) {
+      run += seglen[i];
+      out.max_straight_m = std::max(out.max_straight_m, static_cast<float>(run));
+    } else {
+      run = 0.0;
+    }
+  }
+  return out;
+}
+
+// Curve density = weighted curve metres / length. ~0 = straight, ~0.5 = a great
+// pass (Stelvio measured 0.64), can exceed 1.0 where the tightest hairpins
+// (weight 2.0) dominate. The scenic-road attractiveness base signal.
+inline float curve_density(const ShapeCurve& c) {
+  return c.length_m > 0.0f ? c.curvy_m / c.length_m : 0.0f;
+}
+
+// Curve-metric thresholds. Validated against the beloved-roads acceptance set:
+// passes score 0.5-1.0, sweeper roads ~0.34, a pleasant rural Landstraße ~0.20,
+// straight controls 0.09-0.12. A stretch must SEED on a clearly curvy edge and
+// is EMITTED only if its overall density clears the floor; growth spans straights
+// up to kMaxStraightRunMeters so hairpin-straight-hairpin chains stay together.
+inline constexpr float kSeedCurveDensity = 0.18f;  // start on a clearly curvy edge
+inline constexpr float kGrowCurveDensity = 0.05f;  // below this an edge is "straight"
+inline constexpr float kEmitCurveDensity = 0.15f;  // emitted stretch must clear this
+inline constexpr float kMaxStraightRunMeters = 2400.0f; // ~1.5 mi straight ends a stretch
 
 // Quantization-byte thresholds for the growth rules. The PRD specifies the
 // SEED and GROW thresholds as wire bytes (102 and 76 respectively) — those
@@ -46,7 +135,9 @@ inline constexpr uint32_t kMaxStraightBlipMeters = 200;
 // + EdgeInfo so unit tests can build vectors directly without a GraphTile.
 struct EdgeCandidate {
   uint32_t length_m{0};            // edge length in meters
-  uint8_t sinuosity_byte{0};       // EdgeInfo::sinuosity()
+  uint8_t sinuosity_byte{0};       // EdgeInfo::sinuosity() (legacy; unused by v3 metric)
+  float curvy_m{0.0f};             // weighted curve metres (compute_shape_curve)
+  float max_straight_m{0.0f};      // longest continuous straight run within the edge
   baldr::RoadClass road_class{baldr::RoadClass::kInvalid};
   baldr::Use use{baldr::Use::kRoad};
   uint8_t surface{0};              // baldr::Surface byte (0=smooth .. 7=impassable)
