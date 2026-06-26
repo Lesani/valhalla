@@ -3,7 +3,7 @@ option optimize_for = LITE_RUNTIME;
 package valhalla;
 
 // Scenic stretches sidecar produced by valhalla_extract_stretches.
-// One Stretch is a contiguous, same-RoadClass, curvy run of base edges.
+// One Stretch is a contiguous, same-RoadClass, same-surface, curvy run of base edges.
 // Coordinates are stored as parallel packed double arrays (separate lat/lon)
 // rather than interleaved; this keeps the schema readable and the Python
 // loader trivial (numpy/zip without a stride). Polylines are sampled
@@ -16,6 +16,7 @@ message Stretch {
   float score = 5;          // [0..1], length-weighted-mean-sinuosity normalized * class weight, clamped
   uint32 road_class = 6;    // baldr::RoadClass enum value (0..7)
   float mean_sinuosity = 7; // length-weighted mean raw arc/chord (~[1.0, 3.0])
+  uint32 surface = 8;       // baldr::Surface byte (0 paved_smooth .. 7 impassable); stretch is surface-homogeneous
 }
 
 message StretchCollection {

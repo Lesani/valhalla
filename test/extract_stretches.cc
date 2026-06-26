@@ -45,12 +45,14 @@ EdgeCandidate make_edge(uint32_t length_m,
                         double lat0 = 0.0,
                         double lon0 = 0.0,
                         double lat1 = 0.0,
-                        double lon1 = 0.0) {
+                        double lon1 = 0.0,
+                        uint8_t surface = 1) {  // default paved
   EdgeCandidate e;
   e.length_m = length_m;
   e.sinuosity_byte = sinuosity_byte;
   e.road_class = cls;
   e.use = Use::kRoad;
+  e.surface = surface;
   e.roundabout = false;
   e.restricted_access = false;
   if (lat0 == lat1 && lon0 == lon1) {
@@ -278,6 +280,18 @@ TEST(StretchExtractor, EmitTwoOverlongEdgesDropsNoInfiniteRecursion) {
   // Same unsplittable-but-overlong case (size < 3) — must drop, not hang.
   std::vector<EdgeCandidate> edges{make_edge(15000, 200), make_edge(15000, 190)};
   EXPECT_TRUE(emit_with_splits(edges).empty());
+}
+
+TEST(StretchExtractor, FinalizeRecordsWorstSurface) {
+  // Build an in-band run whose edges carry surfaces 1,2,1 -> worst = 2.
+  // (In production, growth never mixes surfaces — this guards the metric.)
+  std::vector<EdgeCandidate> edges{
+      make_edge(1000, 200, RoadClass::kTertiary, 0, 0, 0, 0, 1),
+      make_edge(1000, 200, RoadClass::kTertiary, 0, 0, 0, 0, 2),
+      make_edge(1000, 200, RoadClass::kTertiary, 0, 0, 0, 0, 1)};
+  auto out = emit_with_splits(edges);
+  ASSERT_EQ(out.size(), 1u);
+  EXPECT_EQ(out[0].surface, 2);
 }
 
 // ---- passes_emit_filters ----

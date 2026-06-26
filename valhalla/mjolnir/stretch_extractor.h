@@ -49,6 +49,7 @@ struct EdgeCandidate {
   uint8_t sinuosity_byte{0};       // EdgeInfo::sinuosity()
   baldr::RoadClass road_class{baldr::RoadClass::kInvalid};
   baldr::Use use{baldr::Use::kRoad};
+  uint8_t surface{0};              // baldr::Surface byte (0=smooth .. 7=impassable)
   bool roundabout{false};          // skip — roundabouts break stretches
   bool restricted_access{false};   // skip — non-motorbike-allowed edges
   std::vector<midgard::PointLL> shape; // ordered start -> end of base edge
@@ -63,6 +64,7 @@ struct EmittedStretch {
   float mean_sinuosity_raw{0.0f}; // length-weighted mean of (1.0 + byte/127.5), in [1.0, 3.0]
   float score{0.0f};              // (mean_sinuosity_byte/255) * class_multiplier, normalized to [0..1]
   baldr::RoadClass road_class{baldr::RoadClass::kInvalid};
+  uint8_t surface{0};             // worst (max) Surface byte across the stretch's edges
 };
 
 // Length-weighted mean sinuosity byte across the given edges.
@@ -210,6 +212,11 @@ inline EmittedStretch finalize(std::span<const EdgeCandidate> edges) {
   out.road_class = edges.front().road_class;
   out.score = compute_score(mean_byte, out.road_class);
   out.polyline = concatenate_shapes(edges);
+  uint8_t worst = 0;
+  for (const auto& e : edges) {
+    if (e.surface > worst) worst = e.surface;
+  }
+  out.surface = worst;
   return out;
 }
 

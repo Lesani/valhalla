@@ -74,6 +74,7 @@ EdgeCandidate make_candidate(const GraphTile& tile, const DirectedEdge* de) {
   c.sinuosity_byte = tile.edgeinfo(de).sinuosity();
   c.road_class = de->classification();
   c.use = de->use();
+  c.surface = static_cast<uint8_t>(de->surface());
   c.roundabout = de->roundabout();
   // "Restricted access" for our purposes = the edge has any access_restriction
   // attached. We don't sub-filter — anything restricted is a hard stop.
@@ -95,7 +96,8 @@ GraphId next_edge_in_chain(GraphReader& reader,
                            const graph_tile_ptr& current_tile,
                            const DirectedEdge* current_de,
                            const GraphId& /*current_edge_id*/,
-                           RoadClass anchor_class) {
+                           RoadClass anchor_class,
+                           uint8_t anchor_surface) {
   const GraphId end_node = current_de->endnode();
   // If the end node lives in the same tile we're already holding, reuse the
   // existing ptr instead of round-tripping through the GraphReader cache.
@@ -118,6 +120,7 @@ GraphId next_edge_in_chain(GraphReader& reader,
     if (de->localedgeidx() == opp_local_idx) continue; // would walk back
     if (de->roundabout()) continue;
     if (de->classification() != anchor_class) continue;
+    if (static_cast<uint8_t>(de->surface()) != anchor_surface) continue;
     if (de->access_restriction() != 0) continue;
     // Found one. Stop counting at 2 to keep this O(1) per node.
     if (++found > 1) {
@@ -138,6 +141,7 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
   std::vector<EdgeCandidate> chain;
   const DirectedEdge* seed_de = seed_tile->directededge(seed_edge_id);
   const RoadClass anchor_class = seed_de->classification();
+  const uint8_t anchor_surface = static_cast<uint8_t>(seed_de->surface());
 
   GraphId cur_edge_id = seed_edge_id;
   graph_tile_ptr cur_tile = seed_tile;
@@ -167,7 +171,8 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
       }
     }
 
-    GraphId next = next_edge_in_chain(reader, cur_tile, cur_de, cur_edge_id, anchor_class);
+    GraphId next = next_edge_in_chain(reader, cur_tile, cur_de, cur_edge_id,
+                                      anchor_class, anchor_surface);
     if (!next.is_valid()) break;
     graph_tile_ptr next_tile = (next.tile_base() == cur_tile->id())
                                    ? cur_tile
@@ -293,6 +298,7 @@ void extract_stretches(const boost::property_tree::ptree& pt,
           msg->set_score(s.score);
           msg->set_road_class(static_cast<uint32_t>(s.road_class));
           msg->set_mean_sinuosity(s.mean_sinuosity_raw);
+          msg->set_surface(s.surface);
           for (const auto& p : s.polyline) {
             msg->add_polyline_lat(p.lat());
             msg->add_polyline_lon(p.lng());
