@@ -933,10 +933,14 @@ void BuildTileSet(const std::string& ways_file,
               tagged_values.push_back(encoded_node_ids);
             }
 
-            // Compute the sinuosity byte once; it is stored both as a
-            // TaggedValue on the EdgeInfo (QA/debug channel, see below) and
-            // in the DirectedEdgeExt record (hot-path channel, issue #20).
-            const uint8_t sinuosity_byte = valhalla::baldr::compute_sinuosity_byte(shape);
+            // Compute the per-edge curve-density byte once; it is stored both
+            // as a TaggedValue on the EdgeInfo (QA/debug channel, see below) and
+            // in the DirectedEdgeExt record (hot-path channel for the costing).
+            // v3: this replaces the legacy windowed-sinuosity byte (which had a
+            // 100 m edge-length floor that zeroed the short edges making up real
+            // twisty roads). The variable keeps its name for minimal churn but
+            // now carries curve density * 100 (Menger radius-binning).
+            const uint8_t sinuosity_byte = valhalla::baldr::compute_curve_density_byte(shape);
 
             // Append sinuosity as a tagged value (better_mc_routing v1).
             // Encoding: 1 tag byte + 1 payload byte. The payload is

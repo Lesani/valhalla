@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -179,6 +180,67 @@ inline uint8_t compute_sinuosity_byte(std::span<const midgard::PointLL> shape) {
   const double blended = kSinuosityWindowWeight * s_win + kSinuosityTurnWeight * t;
   return static_cast<uint8_t>(
       std::clamp(static_cast<int>(std::lround(255.0 * blended)), 0, 255));
+}
+
+// ---------------------------------------------------------------------------
+// Curve density (Menger curvature / radius-binning) — better_mc_routing v3.
+// The shared low-level home for the curve metric used by BOTH the tile-build
+// (graphbuilder stores a per-edge byte) and the scenic-stretch extractor.
+// Adapted from Adam Franco's roadcurvature project. Unlike compute_sinuosity_byte
+// it has NO minimum-edge-length floor, so the short edges that make up real
+// twisty roads (split at every node) still register their curvature.
+// ---------------------------------------------------------------------------
+
+// Curve-radius bins (metres) -> weight; a tighter curve counts more.
+inline float curve_weight_for_radius(double radius_m) {
+  if (radius_m < 30.0) return 2.0f;
+  if (radius_m < 60.0) return 1.6f;
+  if (radius_m < 100.0) return 1.3f;
+  if (radius_m < 175.0) return 1.0f;
+  return 0.0f;
+}
+
+// Menger circumradius from three geodesic side lengths; +inf when collinear.
+inline double curve_circumradius(double a, double b, double c) {
+  const double d =
+      std::sqrt(std::fabs((a + b + c) * (b + c - a) * (c + a - b) * (a + b - c)));
+  return d == 0.0 ? std::numeric_limits<double>::infinity() : (a * b * c) / d;
+}
+
+// Curve density of a shape = sum(segment_length * radius-bin weight) / length.
+// ~0 straight, ~0.5 a great pass, can exceed 1.0 on tight hairpins.
+inline float compute_curve_density(std::span<const midgard::PointLL> shape) {
+  const size_t n = shape.size();
+  if (n < 2) {
+    return 0.0f;
+  }
+  std::vector<double> seglen(n - 1);
+  for (size_t i = 0; i + 1 < n; ++i) {
+    seglen[i] = shape[i].Distance(shape[i + 1]);
+  }
+  std::vector<double> segrad(n - 1, std::numeric_limits<double>::infinity());
+  for (size_t i = 1; i + 1 < n; ++i) {
+    const double base = shape[i - 1].Distance(shape[i + 1]);
+    const double r = curve_circumradius(seglen[i - 1], seglen[i], base);
+    segrad[i - 1] = std::min(segrad[i - 1], r);
+    segrad[i] = std::min(segrad[i], r);
+  }
+  double curvy = 0.0, total = 0.0;
+  for (size_t i = 0; i + 1 < n; ++i) {
+    total += seglen[i];
+    curvy += seglen[i] * curve_weight_for_radius(segrad[i]);
+  }
+  return total > 0.0 ? static_cast<float>(curvy / total) : 0.0f;
+}
+
+// Quantize curve density to a byte for per-edge tile storage: density * 100,
+// capped at 255 (so 0..2.55 density, 0.01 resolution). The costing decodes
+// byte/100.0. Stored in the same DirectedEdgeExt slot the legacy sinuosity
+// byte used (we are replacing the metric, not the plumbing).
+inline uint8_t compute_curve_density_byte(std::span<const midgard::PointLL> shape) {
+  const float density = compute_curve_density(shape);
+  return static_cast<uint8_t>(
+      std::clamp(static_cast<int>(std::lround(100.0f * density)), 0, 255));
 }
 
 } // namespace baldr
