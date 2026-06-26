@@ -651,10 +651,19 @@ public:
     const uint8_t sin_byte = (edgeid.is_valid() && tile->header()->has_ext_directededge())
                                  ? tile->ext_directededge(edgeid)->sinuosity()
                                  : 0;
+    // v3: don't let the curve preference pull a SURFACE-AVERSE profile onto
+    // curvy GRAVEL. On unpaved edges (baldr::Surface >= kCompacted = 3) for a
+    // profile that avoids bad surfaces (surface_factor_ high == use_trails low,
+    // e.g. sport_touring), withhold the curve discount — score the edge as if
+    // straight (byte 0 -> max straightness penalty) so curvy gravel is never
+    // cheaper than paved. Adventure (surface_factor_ ~0, use_trails high) keeps
+    // the curve preference on gravel.
+    const bool unpaved = static_cast<uint8_t>(edge->surface()) >= 3;
+    const uint8_t curve_byte = (unpaved && surface_factor_ > 1.0f) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
-    const float sp = straightness_penalty(sin_byte, curvy_alpha_);
+    const float sp = straightness_penalty(curve_byte, curvy_alpha_);
     const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
     const float tm = toll_multiplier(edge->toll(), edge->classification(), use_scenic_tolls_);
     return Cost(base.cost * sp * cm * tm, base.secs);
