@@ -29,6 +29,15 @@ constexpr float kDefaultUseHighways = 0.5f; // Factor between 0 and 1
 constexpr float kDefaultUseTolls = 0.5f;    // Factor between 0 and 1
 constexpr float kDefaultUseTrails = 0.0f;   // Factor between 0 and 1
 
+// better_mc_routing: ETA credibility floor. Valhalla bakes walking-pace default
+// speeds (2-12 km/h) onto track/path/driveway edges. A road-going motorcycle does
+// not crawl at that speed, so a mandatory low-class connector (e.g. an endpoint
+// snapped onto a forest track) would otherwise inflate the reported ETA 3-4x.
+// Floor the speed used for ELAPSED TIME at this value. Elapsed time only — the
+// cost-shaping factors (surface/class/curve) are untouched, so route choice on
+// real roads is unchanged. Ferries are exempt (their speed is legitimately low).
+constexpr uint32_t kMotorcycleMinEtaSpeed = 25; // km/h
+
 constexpr Surface kMinimumMotorcycleSurface = Surface::kImpassable;
 
 // Default turn costs
@@ -434,6 +443,13 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
     // Use the edge speed (should be the speed of the ferry)
     return {sec * ferry_factor_, sec};
   }
+
+  // ETA credibility: recompute elapsed time with a speed floor so mandatory
+  // low-class connectors (tracks/paths/driveways at Valhalla's walking-pace
+  // default speed) don't blow up the ETA. Route choice is unaffected — the
+  // cost factors below still steer onto real roads. (See kMotorcycleMinEtaSpeed.)
+  const uint32_t eta_speed = std::max<uint32_t>(final_speed, kMotorcycleMinEtaSpeed);
+  sec = (edge->length() * kSpeedFactor[eta_speed]);
 
   float factor = kDensityFactor[edge->density()] +
                  highway_factor_ * kHighwayFactor[static_cast<uint32_t>(edge->classification())] +
@@ -894,6 +910,20 @@ EXPECT_THAT(ctorTester->use_trails , test::IsBetween(kUseTrailsRange.min, kUseTr
 EXPECT_THAT(ctorTester->use_tolls , test::IsBetween(kUseTollsRange.min, kUseTollsRange.max));
    }
    **/
+}
+
+TEST(MotorcycleCost, etaSpeedFloor) {
+  // A sub-floor speed must yield an elapsed time no slower than the floor, and a
+  // supra-floor speed must be unchanged. kSpeedFactor is seconds-per-metre at a
+  // given km/h, so a higher speed => smaller factor.
+  const uint32_t floor = kMotorcycleMinEtaSpeed; // 25
+  EXPECT_EQ(std::max<uint32_t>(5u, floor), floor);
+  EXPECT_EQ(std::max<uint32_t>(80u, floor), 80u);
+  // time for a 1 km track edge at the raw 5 km/h default vs. the floored speed:
+  const float raw = 1000.0f * kSpeedFactor[5];
+  const float floored = 1000.0f * kSpeedFactor[std::max<uint32_t>(5u, floor)];
+  EXPECT_LT(floored, raw); // floor makes it faster/credible
+  EXPECT_NEAR(floored, 1000.0f * kSpeedFactor[25], 1e-4);
 }
 } // namespace
 
