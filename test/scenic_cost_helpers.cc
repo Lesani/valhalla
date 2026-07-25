@@ -13,10 +13,13 @@ using valhalla::baldr::RoadClass;
 using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
 using valhalla::sif::class_multiplier;
+using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCurvyDetourCap;
+using valhalla::sif::scaled_class_multipliers;
 using valhalla::sif::straightness_penalty;
 using valhalla::sif::toll_multiplier;
+using valhalla::sif::track_class_multiplier;
 
 namespace {
 
@@ -201,6 +204,115 @@ TEST(Admissibility, CombinedMultiplierNeverBelowOne) {
                   << " class=" << static_cast<int>(cls) << " use=" << static_cast<int>(use)
                   << " toll=" << toll << " ust=" << ust << " (sp=" << sp << " cm=" << cm
                   << " tm=" << tm << ")";
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---- D1: use_highways / use_trails scaled class multipliers ----
+
+TEST(ScaledClassMultipliers, MotorwayAnchorValues) {
+  EXPECT_NEAR(scaled_class_multipliers(1.0f, 0.0f).motorway, 1.15f, 1e-5f);
+  EXPECT_NEAR(scaled_class_multipliers(0.9f, 0.0f).motorway, 1.36662f, 1e-3f);
+  EXPECT_NEAR(scaled_class_multipliers(0.5f, 0.0f).motorway, 3.57184f, 1e-3f);
+  EXPECT_NEAR(scaled_class_multipliers(0.1f, 0.0f).motorway, 6.99863f, 1e-3f);
+  EXPECT_NEAR(scaled_class_multipliers(0.0f, 0.0f).motorway, 8.0f, 1e-5f);
+}
+
+TEST(ScaledClassMultipliers, TrunkAnchorValues) {
+  EXPECT_NEAR(scaled_class_multipliers(1.0f, 0.0f).trunk, 1.10f, 1e-5f);
+  EXPECT_NEAR(scaled_class_multipliers(0.0f, 0.0f).trunk, 4.5f, 1e-5f);
+}
+
+TEST(ScaledClassMultipliers, TrackAnchorValues) {
+  EXPECT_NEAR(scaled_class_multipliers(0.1f, 0.0f).track, 6.0f, 1e-5f);
+  EXPECT_NEAR(scaled_class_multipliers(0.1f, 0.7f).track, 2.5f, 1e-5f);
+  EXPECT_NEAR(scaled_class_multipliers(0.1f, 1.0f).track, 1.0f, 1e-5f);
+}
+
+TEST(ScaledClassMultipliers, MonotonicDecreasingInUseHighways) {
+  float prev_mw = scaled_class_multipliers(0.0f, 0.0f).motorway;
+  float prev_tk = scaled_class_multipliers(0.0f, 0.0f).trunk;
+  for (float uh : {0.1f, 0.25f, 0.5f, 0.75f, 0.9f, 1.0f}) {
+    const auto w = scaled_class_multipliers(uh, 0.0f);
+    EXPECT_LT(w.motorway, prev_mw) << "uh=" << uh;
+    EXPECT_LT(w.trunk, prev_tk) << "uh=" << uh;
+    prev_mw = w.motorway;
+    prev_tk = w.trunk;
+  }
+}
+
+TEST(ScaledClassMultipliers, MonotonicDecreasingInUseTrails) {
+  float prev = scaled_class_multipliers(0.1f, 0.0f).track;
+  for (float ut : {0.1f, 0.3f, 0.7f, 0.9f, 1.0f}) {
+    const float t = scaled_class_multipliers(0.1f, ut).track;
+    EXPECT_LT(t, prev) << "ut=" << ut;
+    prev = t;
+  }
+}
+
+TEST(ScaledClassMultipliers, UnscaledRowsMatchDefaults) {
+  const ClassMultipliers def{};
+  for (float uh : {0.0f, 0.1f, 0.5f, 0.9f, 1.0f}) {
+    for (float ut : {0.0f, 0.7f, 1.0f}) {
+      const auto w = scaled_class_multipliers(uh, ut);
+      EXPECT_FLOAT_EQ(w.primary, def.primary);
+      EXPECT_FLOAT_EQ(w.secondary, def.secondary);
+      EXPECT_FLOAT_EQ(w.tertiary, def.tertiary);
+      EXPECT_FLOAT_EQ(w.unclassified, def.unclassified);
+      EXPECT_FLOAT_EQ(w.residential, def.residential);
+      EXPECT_FLOAT_EQ(w.living_street, def.living_street);
+      EXPECT_FLOAT_EQ(w.service, def.service);
+    }
+  }
+}
+
+TEST(ScaledClassMultipliers, AllRowsNeverBelowOne) {
+  for (float uh : {0.0f, 0.1f, 0.5f, 0.9f, 1.0f}) {
+    for (float ut : {0.0f, 0.7f, 1.0f}) {
+      const auto w = scaled_class_multipliers(uh, ut);
+      for (float v : {w.motorway, w.trunk, w.primary, w.secondary, w.tertiary,
+                      w.unclassified, w.residential, w.living_street, w.service, w.track}) {
+        EXPECT_GE(v, 1.0f) << "uh=" << uh << " ut=" << ut;
+      }
+    }
+  }
+}
+
+// Extends the exhaustive >= 1.0 combined-multiplier grid with the uh/ut axes.
+TEST(Admissibility, ScaledCombinedMultiplierNeverBelowOne) {
+  const uint8_t sinuosity_bytes[] = {0, 64, 128, 255};
+  const float alphas[] = {0.0f, 0.3f, 0.6f, 0.95f};
+  const float usts[] = {0.2f, 0.5f, 0.7f};
+  const float uhs[] = {0.0f, 0.1f, 0.5f, 0.9f, 1.0f};
+  const float uts[] = {0.0f, 0.7f, 1.0f};
+  const RoadClass classes[] = {RoadClass::kMotorway,    RoadClass::kTrunk,
+                               RoadClass::kPrimary,     RoadClass::kSecondary,
+                               RoadClass::kTertiary,    RoadClass::kUnclassified,
+                               RoadClass::kResidential, RoadClass::kServiceOther};
+  const Use uses[] = {Use::kRoad, Use::kTrack, Use::kLivingStreet};
+
+  for (float uh : uhs) {
+    for (float ut : uts) {
+      const ClassMultipliers w = scaled_class_multipliers(uh, ut);
+      for (uint8_t sin_byte : sinuosity_bytes) {
+        for (float alpha : alphas) {
+          const float sp = straightness_penalty(sin_byte, alpha);
+          for (RoadClass cls : classes) {
+            for (Use use : uses) {
+              const float cm = class_multiplier(cls, use, w);
+              for (bool toll : {false, true}) {
+                for (float ust : usts) {
+                  const float tm = toll_multiplier(toll, cls, ust);
+                  EXPECT_GE(sp * cm * tm, 1.0f)
+                      << "uh=" << uh << " ut=" << ut << " sin=" << static_cast<int>(sin_byte)
+                      << " alpha=" << alpha << " class=" << static_cast<int>(cls)
+                      << " use=" << static_cast<int>(use) << " toll=" << toll << " ust=" << ust;
+                }
+              }
             }
           }
         }

@@ -77,6 +77,15 @@ constexpr ranged_default_t<float> kCurvyAlphaRange{0.0f, kDefaultCurvyAlpha, 0.9
 constexpr float kDefaultUseScenicTolls = 0.5f;
 constexpr ranged_default_t<float> kUseScenicTollsRange{0.2f, kDefaultUseScenicTolls, 0.7f};
 
+// Profile-rework D1: motorcycle_curvy now READS use_highways / use_trails from
+// the request (they were hardcoded). These curvy-specific defaults keep a bare
+// request at today's strong-avoid character (uh=0.1, ut=0.0) rather than
+// falling to the stock use_highways default of 0.5.
+constexpr float kDefaultCurvyUseHighways = 0.1f; // historical motorcycle_curvy value
+constexpr ranged_default_t<float> kCurvyUseHighwaysRange{0.0f, kDefaultCurvyUseHighways, 1.0f};
+constexpr float kDefaultCurvyUseTrails = 0.0f;
+constexpr ranged_default_t<float> kCurvyUseTrailsRange{0.0f, kDefaultCurvyUseTrails, 1.0f};
+
 constexpr float kHighwayFactor[] = {
     1.0f, // Motorway
     0.5f, // Trunk
@@ -643,10 +652,14 @@ cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
 class MotorcycleCurvyCost : public MotorcycleCost {
 public:
   MotorcycleCurvyCost(const Costing& costing_options) : MotorcycleCost(costing_options) {
-    // ParseMotorcycleCurvyCostOptions already clamped both values via the
-    // ranged_default_t types before this constructor runs.
+    // ParseMotorcycleCurvyCostOptions already clamped these via ranged_default_t.
     curvy_alpha_ = costing_options.options().curvy_alpha();
     use_scenic_tolls_ = costing_options.options().use_scenic_tolls();
+    // D1: scale motorway/trunk (use_highways) and track (use_trails) ONCE here;
+    // EdgeCost reads class_mult_ per edge (no per-edge recompute).
+    const float uh = costing_options.options().use_highways();
+    const float ut = costing_options.options().use_trails();
+    class_mult_ = scaled_class_multipliers(uh, ut);
   }
 
   Cost EdgeCost(const baldr::DirectedEdge* edge,
@@ -702,21 +715,23 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   rapidjson::Value dummy;
   const auto& json = rapidjson::get_child(doc, costing_options_key.c_str(), dummy);
 
-  // Issue 09: motorcycle_curvy hardcodes the inherited motorcycle options
-  // to curvy-friendly values that are NOT exposed in the v1 API surface.
-  // The user-facing knobs are only curvy_alpha and use_scenic_tolls.
-  //   use_highways = 0.1     strong motorway avoid
-  //   use_tolls = 0.2        ( = use_road_tolls) road-toll hard avoid;
-  //                          our toll_multiplier adds a 1.6x on top of this
-  //                          for road tolls, scenic tolls scale separately
-  //   use_trails = 0.0       forbid trails (road bike, not adventure tour)
-  //   top_speed = 120 km/h   discourage routing into 140+ km/h motorway
-  //                          edges via ETA component
+  // Profile-rework D1: use_highways and use_trails are now LIVE knobs for
+  // motorcycle_curvy — they were previously hardcoded, silently discarding
+  // whatever the request sent. Absent, they fall to curvy-specific defaults
+  // (uh=0.1, ut=0.0) that preserve legacy no-options routing. use_tolls and
+  // top_speed stay hardcoded (out of D1 scope).
+  //   use_highways (default 0.1)  scales motorway/trunk rows + base highway_factor_
+  //   use_tolls = 0.2             ( = use_road_tolls) road-toll hard avoid;
+  //                               our toll_multiplier adds a 1.6x on top of this
+  //                               for road tolls, scenic tolls scale separately
+  //   use_trails (default 0.0)    scales the track row + base surface_factor_
+  //   top_speed = 120 km/h        discourage routing into 140+ km/h motorway
+  //                               edges via ETA component
   ParseBaseCostOptions(json, c, kBaseCostOptsConfig, warnings);
-  co->set_use_highways(0.1f);
-  co->set_use_tolls(0.2f);
-  co->set_use_trails(0.0f);
-  co->set_top_speed(120);
+  JSON_PBF_RANGED_DEFAULT(co, kCurvyUseHighwaysRange, json, "/use_highways", use_highways, warnings);
+  co->set_use_tolls(0.2f);   // unchanged (road-toll hard avoid; out of D1 scope)
+  JSON_PBF_RANGED_DEFAULT(co, kCurvyUseTrailsRange, json, "/use_trails", use_trails, warnings);
+  co->set_top_speed(120);    // unchanged
   JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseScenicTollsRange, json, "/use_scenic_tolls", use_scenic_tolls,
                           warnings);

@@ -2,6 +2,7 @@
 #define VALHALLA_SIF_SCENIC_COST_HELPERS_H_
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include <valhalla/baldr/graphconstants.h>
@@ -79,6 +80,40 @@ struct ClassMultipliers {
   float service = 2.94f;
   float track = 5.88f;
 };
+
+// Profile-rework D1: use_highways / use_trails scale three class-multiplier
+// rows. These are PER-REQUEST constants — compute the scaled table ONCE at
+// costing construction (MotorcycleCurvyCost ctor), never per edge. All rows
+// stay >= 1.0 (admissibility invariant, Issue #18); the formulas guarantee it.
+inline constexpr float kMotorwayMultMin = 1.15f;      // use_highways = 1.0
+inline constexpr float kMotorwayMultMax = 8.0f;       // use_highways = 0.0
+inline constexpr float kTrunkMultMin = 1.10f;         // use_highways = 1.0
+inline constexpr float kTrunkMultMax = 4.5f;          // use_highways = 0.0
+inline constexpr float kHighwayMultExponent = 1.5f;   // (1 - uh) ^ 1.5 easing
+inline constexpr float kTrackMultAtZero = 6.0f;       // use_trails = 0.0 (~ today's 5.88)
+inline constexpr float kTrackMultSlope = 5.0f;        // track(ut) = 6.0 - 5.0*ut -> ut=1 -> 1.0
+
+// motorway(uh) = 1.15 + (8.0 - 1.15)*(1-uh)^1.5 ; trunk(uh) = 1.10 + (4.5-1.10)*(1-uh)^1.5
+inline float highway_class_multiplier(float lo, float hi, float use_highways) {
+  const float uh = std::clamp(use_highways, 0.0f, 1.0f);
+  return lo + (hi - lo) * std::pow(1.0f - uh, kHighwayMultExponent);
+}
+
+// track(ut) = 6.0 - 5.0*ut ; floored at 1.0 to hold the >= 1.0 invariant.
+inline float track_class_multiplier(float use_trails) {
+  const float ut = std::clamp(use_trails, 0.0f, 1.0f);
+  return std::max(1.0f, kTrackMultAtZero - kTrackMultSlope * ut);
+}
+
+// Build the per-request table from the parsed stock options. Every row except
+// motorway/trunk/track keeps the compile-time ClassMultipliers default.
+inline ClassMultipliers scaled_class_multipliers(float use_highways, float use_trails) {
+  ClassMultipliers w; // compile-time defaults (primary/secondary/tertiary/... untouched)
+  w.motorway = highway_class_multiplier(kMotorwayMultMin, kMotorwayMultMax, use_highways);
+  w.trunk = highway_class_multiplier(kTrunkMultMin, kTrunkMultMax, use_highways);
+  w.track = track_class_multiplier(use_trails);
+  return w;
+}
 
 /**
  * Pure lookup for the cost multiplier of an edge with the given RoadClass
