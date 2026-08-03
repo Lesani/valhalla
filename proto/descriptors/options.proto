@@ -365,6 +365,9 @@ message Costing {
     oneof has_use_scenic_tolls {
       float use_scenic_tolls = 98; // [0.2, 0.7] scenic-toll preference
     }
+    oneof has_use_small_roads {
+      float use_small_roads = 99; // [0.0, 1.0] scale small-road class multipliers toward 1.0
+    }
   }
 
   oneof has_options {

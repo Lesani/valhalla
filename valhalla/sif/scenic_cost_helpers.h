@@ -105,13 +105,32 @@ inline float track_class_multiplier(float use_trails) {
   return std::max(1.0f, kTrackMultAtZero - kTrackMultSlope * ut);
 }
 
+// D2 (profile character): use_small_roads scales one small-road row toward 1.0.
+// row(usr) = 1.0 + (row_default - 1.0) * (1.0 - usr). usr=0 keeps the compile
+// default (Calimoto fix intact for every other profile); usr=1 -> 1.0. Since
+// every small-road row_default >= 1.0, the result stays >= 1.0 for usr in [0,1]
+// (admissibility invariant, Issue #18).
+inline float small_road_multiplier(float row_default, float use_small_roads) {
+  const float usr = std::clamp(use_small_roads, 0.0f, 1.0f);
+  return 1.0f + (row_default - 1.0f) * (1.0f - usr);
+}
+
 // Build the per-request table from the parsed stock options. Every row except
-// motorway/trunk/track keeps the compile-time ClassMultipliers default.
-inline ClassMultipliers scaled_class_multipliers(float use_highways, float use_trails) {
+// motorway/trunk/track and the four small-road rows keeps the compile-time
+// ClassMultipliers default. use_small_roads defaults to 0.0f so existing 2-arg
+// callers (and gtests) keep today's table unchanged.
+inline ClassMultipliers scaled_class_multipliers(float use_highways,
+                                                 float use_trails,
+                                                 float use_small_roads = 0.0f) {
   ClassMultipliers w; // compile-time defaults (primary/secondary/tertiary/... untouched)
   w.motorway = highway_class_multiplier(kMotorwayMultMin, kMotorwayMultMax, use_highways);
   w.trunk = highway_class_multiplier(kTrunkMultMin, kTrunkMultMax, use_highways);
   w.track = track_class_multiplier(use_trails);
+  // D2: small-road rows scale toward 1.0 (usr default 0 == today's table).
+  w.residential = small_road_multiplier(w.residential, use_small_roads);
+  w.living_street = small_road_multiplier(w.living_street, use_small_roads);
+  w.service = small_road_multiplier(w.service, use_small_roads);
+  w.unclassified = small_road_multiplier(w.unclassified, use_small_roads);
   return w;
 }
 
@@ -211,6 +230,26 @@ inline float toll_multiplier(bool has_toll,
   }
   // Road toll: fixed hard avoid (= use_scenic_tolls of 0.2).
   return 1.6f;
+}
+
+// D1 rev.2 (profile character): paved-surface penalty for MotorcycleCurvyCost
+// only. Above use_trails 0.5 each PAVED edge is penalized proportionally to
+// its assigned speed so its per-km cost equals a kUnpavedRefSpeed unpaved
+// edge's, times a constant asphalt aversion: route choice becomes DISTANCE-
+// driven with asphalt at a fixed per-km premium (owner: "time is not a
+// relevant factor for adventure"). ut <= 0.5 is inert; unpaved edges
+// (Surface >= kCompacted == 3) are never penalized. Always >= 1.0.
+inline constexpr float kUnpavedRefSpeed = 25.0f; // measured corridor gravel speed
+inline constexpr float kPavedAversion = 1.5f;    // asphalt per-km premium at ut=1.0
+
+inline float paved_multiplier(baldr::Surface surface, float use_trails, float edge_speed_kph) {
+  const float ut = std::clamp(use_trails, 0.0f, 1.0f);
+  if (ut <= 0.5f || static_cast<uint8_t>(surface) >= 3) {
+    return 1.0f;
+  }
+  const float t = (ut - 0.5f) * 2.0f; // (0, 1]
+  const float pm_full = std::max(1.0f, edge_speed_kph / kUnpavedRefSpeed) * kPavedAversion;
+  return 1.0f + (pm_full - 1.0f) * t;
 }
 
 } // namespace sif

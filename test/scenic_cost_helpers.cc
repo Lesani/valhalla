@@ -10,13 +10,18 @@
 #include <gtest/gtest.h>
 
 using valhalla::baldr::RoadClass;
+using valhalla::baldr::Surface;
 using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
 using valhalla::sif::class_multiplier;
 using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCurvyDetourCap;
+using valhalla::sif::kPavedAversion;
+using valhalla::sif::kUnpavedRefSpeed;
+using valhalla::sif::paved_multiplier;
 using valhalla::sif::scaled_class_multipliers;
+using valhalla::sif::small_road_multiplier;
 using valhalla::sif::straightness_penalty;
 using valhalla::sif::toll_multiplier;
 using valhalla::sif::track_class_multiplier;
@@ -319,6 +324,234 @@ TEST(Admissibility, ScaledCombinedMultiplierNeverBelowOne) {
       }
     }
   }
+}
+
+// ---- D1 rev.2: speed-equalized paved_multiplier (profile character) ----
+
+TEST(PavedMultiplier, InertAtOrBelowMidpoint) {
+  // At/below use_trails 0.5 the paved penalty is off for every profile, any
+  // surface, any speed.
+  for (float ut : {0.0f, 0.3f, 0.5f}) {
+    for (float speed : {5.0f, 25.0f, 90.0f, 130.0f}) {
+      EXPECT_FLOAT_EQ(paved_multiplier(Surface::kPavedSmooth, ut, speed), 1.0f)
+          << "ut=" << ut << " speed=" << speed;
+      EXPECT_FLOAT_EQ(paved_multiplier(Surface::kPaved, ut, speed), 1.0f)
+          << "ut=" << ut << " speed=" << speed;
+    }
+  }
+}
+
+TEST(PavedMultiplier, UnpavedNeverPenalized) {
+  // Unpaved edges (Surface >= kCompacted == 3) are never penalized, even at
+  // full use_trails and high speed.
+  for (Surface s : {Surface::kCompacted, Surface::kDirt, Surface::kGravel, Surface::kPath}) {
+    for (float speed : {5.0f, 25.0f, 90.0f, 130.0f}) {
+      EXPECT_FLOAT_EQ(paved_multiplier(s, 1.0f, speed), 1.0f)
+          << "surface=" << static_cast<int>(s) << " speed=" << speed;
+    }
+  }
+}
+
+TEST(PavedMultiplier, DistanceEqualizationAtFullTrails) {
+  // ut=1.0: the paved penalty equalizes per-km cost to a kUnpavedRefSpeed
+  // (25 km/h) gravel edge times kPavedAversion, so speed cancels in per-km
+  // terms: pm(speed) == (speed / 25) * 1.5 for speed >= 25.
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 100.0f), 6.0f, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 50.0f), 3.0f, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 25.0f), 1.5f, 1e-5f);
+  // Per-km cost (pm / speed) is a constant kPavedAversion / kUnpavedRefSpeed.
+  const float per_km = kPavedAversion / kUnpavedRefSpeed;
+  for (float speed : {25.0f, 50.0f, 100.0f}) {
+    EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, speed) / speed, per_km, 1e-6f)
+        << "speed=" << speed;
+  }
+}
+
+TEST(PavedMultiplier, SlowPavedFloorsAtAversion) {
+  // ut=1.0, speed below kUnpavedRefSpeed floors at kPavedAversion (the
+  // max(1, speed/ref) guard): a slow paved lane never costs less than 1.5x.
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 10.0f), kPavedAversion, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 5.0f), kPavedAversion, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 24.9f), kPavedAversion, 1e-5f);
+}
+
+TEST(PavedMultiplier, MonotonicIncreasingAboveMidpoint) {
+  // Fixed speed 80, strictly increasing in use_trails on (0.5, 1.0].
+  const float speed = 80.0f;
+  float prev = paved_multiplier(Surface::kPaved, 0.5f, speed); // 1.0 (inert)
+  for (float ut : {0.55f, 0.6f, 0.75f, 0.9f, 1.0f}) {
+    const float current = paved_multiplier(Surface::kPaved, ut, speed);
+    EXPECT_GT(current, prev) << "ut=" << ut;
+    prev = current;
+  }
+}
+
+TEST(PavedMultiplier, NeverBelowOne) {
+  const Surface surfaces[] = {Surface::kPavedSmooth, Surface::kPaved,   Surface::kPavedRough,
+                              Surface::kCompacted,   Surface::kDirt,    Surface::kGravel,
+                              Surface::kPath};
+  for (Surface s : surfaces) {
+    for (float ut : {0.0f, 0.3f, 0.5f, 0.7f, 1.0f}) {
+      for (float speed : {5.0f, 25.0f, 50.0f, 100.0f, 130.0f}) {
+        EXPECT_GE(paved_multiplier(s, ut, speed), 1.0f)
+            << "surface=" << static_cast<int>(s) << " ut=" << ut << " speed=" << speed;
+      }
+    }
+  }
+}
+
+// ---- D2: use_small_roads scaled class multipliers (profile character) ----
+
+TEST(SmallRoadMultipliers, TwistyHunterAnchors) {
+  // usr=0.8 (design D3 twisty_hunter anchors).
+  const auto w = scaled_class_multipliers(0.1f, 0.0f, 0.8f);
+  EXPECT_NEAR(w.residential, 1.13f, 1e-4f);
+  EXPECT_NEAR(w.living_street, 1.27f, 1e-4f);
+  EXPECT_NEAR(w.service, 1.388f, 1e-4f);
+  EXPECT_NEAR(w.unclassified, 1.012f, 1e-4f);
+}
+
+TEST(SmallRoadMultipliers, UsrZeroMatchesDefaults) {
+  const ClassMultipliers def{};
+  const auto w = scaled_class_multipliers(0.1f, 0.0f, 0.0f);
+  EXPECT_FLOAT_EQ(w.residential, def.residential);
+  EXPECT_FLOAT_EQ(w.living_street, def.living_street);
+  EXPECT_FLOAT_EQ(w.service, def.service);
+  EXPECT_FLOAT_EQ(w.unclassified, def.unclassified);
+}
+
+TEST(SmallRoadMultipliers, UsrOneCollapsesToOne) {
+  const auto w = scaled_class_multipliers(0.1f, 0.0f, 1.0f);
+  EXPECT_FLOAT_EQ(w.residential, 1.0f);
+  EXPECT_FLOAT_EQ(w.living_street, 1.0f);
+  EXPECT_FLOAT_EQ(w.service, 1.0f);
+  EXPECT_FLOAT_EQ(w.unclassified, 1.0f);
+  // The pure helper collapses any small-road row default to 1.0 at usr=1.
+  EXPECT_FLOAT_EQ(small_road_multiplier(2.94f, 1.0f), 1.0f);
+}
+
+TEST(SmallRoadMultipliers, MonotonicDecreasingInUsr) {
+  float prev_res = scaled_class_multipliers(0.1f, 0.0f, 0.0f).residential;
+  float prev_ls = scaled_class_multipliers(0.1f, 0.0f, 0.0f).living_street;
+  float prev_svc = scaled_class_multipliers(0.1f, 0.0f, 0.0f).service;
+  float prev_unc = scaled_class_multipliers(0.1f, 0.0f, 0.0f).unclassified;
+  for (float usr : {0.2f, 0.4f, 0.6f, 0.8f, 1.0f}) {
+    const auto w = scaled_class_multipliers(0.1f, 0.0f, usr);
+    EXPECT_LE(w.residential, prev_res) << "usr=" << usr;
+    EXPECT_LE(w.living_street, prev_ls) << "usr=" << usr;
+    EXPECT_LE(w.service, prev_svc) << "usr=" << usr;
+    EXPECT_LE(w.unclassified, prev_unc) << "usr=" << usr;
+    prev_res = w.residential;
+    prev_ls = w.living_street;
+    prev_svc = w.service;
+    prev_unc = w.unclassified;
+  }
+}
+
+TEST(SmallRoadMultipliers, OtherRowsUnaffected) {
+  // motorway/trunk/primary/secondary/tertiary/track do not move with usr when
+  // use_highways and use_trails are held fixed.
+  const auto base = scaled_class_multipliers(0.3f, 0.4f, 0.0f);
+  for (float usr : {0.0f, 0.5f, 1.0f}) {
+    const auto w = scaled_class_multipliers(0.3f, 0.4f, usr);
+    EXPECT_FLOAT_EQ(w.motorway, base.motorway) << "usr=" << usr;
+    EXPECT_FLOAT_EQ(w.trunk, base.trunk) << "usr=" << usr;
+    EXPECT_FLOAT_EQ(w.primary, base.primary) << "usr=" << usr;
+    EXPECT_FLOAT_EQ(w.secondary, base.secondary) << "usr=" << usr;
+    EXPECT_FLOAT_EQ(w.tertiary, base.tertiary) << "usr=" << usr;
+    EXPECT_FLOAT_EQ(w.track, base.track) << "usr=" << usr;
+  }
+}
+
+TEST(SmallRoadMultipliers, AllRowsNeverBelowOne) {
+  for (float uh : {0.0f, 0.1f, 0.5f, 1.0f}) {
+    for (float ut : {0.0f, 0.7f, 1.0f}) {
+      for (float usr : {0.0f, 0.3f, 0.6f, 1.0f}) {
+        const auto w = scaled_class_multipliers(uh, ut, usr);
+        for (float v : {w.motorway, w.trunk, w.primary, w.secondary, w.tertiary, w.unclassified,
+                        w.residential, w.living_street, w.service, w.track}) {
+          EXPECT_GE(v, 1.0f) << "uh=" << uh << " ut=" << ut << " usr=" << usr;
+        }
+      }
+    }
+  }
+}
+
+// ---- Admissibility with the two new factors ----
+
+TEST(Admissibility, CombinedWithPavedAndSmallRoadsNeverBelowOne) {
+  // Extend the exhaustive grid with usr (scaled table) and the pm factor over
+  // paved + unpaved surfaces and speeds. sp * cm * tm * pm >= 1.0 everywhere.
+  const uint8_t sinuosity_bytes[] = {0, 64, 128, 255};
+  const float alphas[] = {0.0f, 0.3f, 0.6f, 0.95f};
+  const float usts[] = {0.2f, 0.5f, 0.7f};
+  const float uhs[] = {0.0f, 0.1f, 1.0f};
+  const float uts[] = {0.0f, 0.7f, 1.0f};
+  const float usrs[] = {0.0f, 0.6f, 1.0f};
+  const float speeds[] = {5.0f, 25.0f, 100.0f, 130.0f};
+  const RoadClass classes[] = {RoadClass::kMotorway,    RoadClass::kTrunk,
+                               RoadClass::kPrimary,     RoadClass::kSecondary,
+                               RoadClass::kTertiary,    RoadClass::kUnclassified,
+                               RoadClass::kResidential, RoadClass::kServiceOther};
+  const Use uses[] = {Use::kRoad, Use::kTrack, Use::kLivingStreet};
+  const Surface surfaces[] = {Surface::kPavedSmooth, Surface::kPaved, Surface::kGravel,
+                              Surface::kPath};
+
+  for (float uh : uhs) {
+    for (float ut : uts) {
+      for (float usr : usrs) {
+        const ClassMultipliers w = scaled_class_multipliers(uh, ut, usr);
+        for (uint8_t sin_byte : sinuosity_bytes) {
+          for (float alpha : alphas) {
+            const float sp = straightness_penalty(sin_byte, alpha);
+            for (RoadClass cls : classes) {
+              for (Use use : uses) {
+                const float cm = class_multiplier(cls, use, w);
+                for (bool toll : {false, true}) {
+                  for (float ust : usts) {
+                    const float tm = toll_multiplier(toll, cls, ust);
+                    for (Surface s : surfaces) {
+                      for (float speed : speeds) {
+                        const float pm = paved_multiplier(s, ut, speed);
+                        EXPECT_GE(sp * cm * tm * pm, 1.0f)
+                            << "uh=" << uh << " ut=" << ut << " usr=" << usr
+                            << " sin=" << static_cast<int>(sin_byte) << " alpha=" << alpha
+                            << " class=" << static_cast<int>(cls) << " use=" << static_cast<int>(use)
+                            << " toll=" << toll << " ust=" << ust
+                            << " surface=" << static_cast<int>(s) << " speed=" << speed;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---- A2: the constants must beat the paved/gravel speed gap ----
+
+TEST(AdventureProfile, GravelBeatsPavedPrimaryPerKm) {
+  // Adventure knobs (uh=0.1, ut=1.0, usr=0.6). On the Karlskrona corridor the
+  // fastest route rides a paved primary at 100 km/h while the scenic corridor
+  // is 25 km/h gravel (an unclassified way). The stacked class + paved factors
+  // must make the paved primary MORE expensive PER KM than the gravel so the
+  // adventure profile leaves the asphalt. This pins the constants against
+  // future retuning below the 4x speed ratio.
+  const ClassMultipliers w = scaled_class_multipliers(0.1f, 1.0f, 0.6f);
+
+  const float cm_primary = class_multiplier(RoadClass::kPrimary, Use::kRoad, w);
+  const float cm_gravel = class_multiplier(RoadClass::kUnclassified, Use::kRoad, w);
+  const float pm_paved = paved_multiplier(Surface::kPaved, 1.0f, 100.0f);
+  const float pm_gravel = paved_multiplier(Surface::kGravel, 1.0f, 25.0f);
+
+  const float paved_per_km = cm_primary * pm_paved / 100.0f;
+  const float gravel_per_km = cm_gravel * pm_gravel / 25.0f;
+  EXPECT_GT(paved_per_km, gravel_per_km)
+      << "paved_per_km=" << paved_per_km << " gravel_per_km=" << gravel_per_km;
 }
 
 } // namespace

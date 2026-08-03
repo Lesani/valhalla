@@ -85,6 +85,11 @@ constexpr float kDefaultCurvyUseHighways = 0.1f; // historical motorcycle_curvy 
 constexpr ranged_default_t<float> kCurvyUseHighwaysRange{0.0f, kDefaultCurvyUseHighways, 1.0f};
 constexpr float kDefaultCurvyUseTrails = 0.0f;
 constexpr ranged_default_t<float> kCurvyUseTrailsRange{0.0f, kDefaultCurvyUseTrails, 1.0f};
+// D2 (profile character): use_small_roads scales the four small-road class-mult
+// rows toward 1.0. Default 0.0 keeps today's table for every profile that does
+// not send it.
+constexpr float kDefaultUseSmallRoads = 0.0f;
+constexpr ranged_default_t<float> kCurvyUseSmallRoadsRange{0.0f, kDefaultUseSmallRoads, 1.0f};
 
 constexpr float kHighwayFactor[] = {
     1.0f, // Motorway
@@ -655,11 +660,14 @@ public:
     // ParseMotorcycleCurvyCostOptions already clamped these via ranged_default_t.
     curvy_alpha_ = costing_options.options().curvy_alpha();
     use_scenic_tolls_ = costing_options.options().use_scenic_tolls();
-    // D1: scale motorway/trunk (use_highways) and track (use_trails) ONCE here;
-    // EdgeCost reads class_mult_ per edge (no per-edge recompute).
+    // D1/D2: scale motorway/trunk (use_highways), track (use_trails) and the
+    // four small-road rows (use_small_roads) ONCE here; EdgeCost reads
+    // class_mult_ + use_trails_ per edge (no per-edge table recompute).
     const float uh = costing_options.options().use_highways();
     const float ut = costing_options.options().use_trails();
-    class_mult_ = scaled_class_multipliers(uh, ut);
+    const float usr = costing_options.options().use_small_roads();
+    use_trails_ = ut;
+    class_mult_ = scaled_class_multipliers(uh, ut, usr);
   }
 
   Cost EdgeCost(const baldr::DirectedEdge* edge,
@@ -695,12 +703,17 @@ public:
     const float sp = straightness_penalty(curve_byte, curvy_alpha_);
     const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
     const float tm = toll_multiplier(edge->toll(), edge->classification(), use_scenic_tolls_);
-    return Cost(base.cost * sp * cm * tm, base.secs);
+    // D1 rev.2: speed-equalized paved penalty (adventure detours onto gravel).
+    // Uses the tile's assigned speed (deterministic, traffic-free).
+    const float pm = paved_multiplier(edge->surface(), use_trails_,
+                                      static_cast<float>(edge->speed()));
+    return Cost(base.cost * sp * cm * tm * pm, base.secs);
   }
 
 protected:
   float curvy_alpha_;
   float use_scenic_tolls_;
+  float use_trails_;             // D1 rev.2: scalar for the per-edge paved_multiplier
   ClassMultipliers class_mult_; // compile-time defaults, see scenic_cost_helpers.h
 };
 
@@ -734,6 +747,9 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   co->set_top_speed(120);    // unchanged
   JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseScenicTollsRange, json, "/use_scenic_tolls", use_scenic_tolls,
+                          warnings);
+  // D2 (profile character): scale the four small-road rows toward 1.0.
+  JSON_PBF_RANGED_DEFAULT(co, kCurvyUseSmallRoadsRange, json, "/use_small_roads", use_small_roads,
                           warnings);
 }
 
