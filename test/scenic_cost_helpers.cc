@@ -355,10 +355,13 @@ TEST(PavedMultiplier, UnpavedNeverPenalized) {
 TEST(PavedMultiplier, DistanceEqualizationAtFullTrails) {
   // ut=1.0: the paved penalty equalizes per-km cost to a kUnpavedRefSpeed
   // (25 km/h) gravel edge times kPavedAversion, so speed cancels in per-km
-  // terms: pm(speed) == (speed / 25) * 1.5 for speed >= 25.
-  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 100.0f), 6.0f, 1e-5f);
-  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 50.0f), 3.0f, 1e-5f);
-  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 25.0f), 1.5f, 1e-5f);
+  // terms: pm(speed) == (speed / 25) * 2.5 for speed >= 25. (Patch 0018
+  // raised kPavedAversion 1.5 -> 2.5: measured on the surfaced Sweden A/B,
+  // 1.5 left adventure at 68.5% unpaved vs 80.7% at 2.5; gains saturate
+  // above 2.5 — see docs/designs/design-surface-inference.md.)
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 100.0f), 10.0f, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 50.0f), 5.0f, 1e-5f);
+  EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 25.0f), 2.5f, 1e-5f);
   // Per-km cost (pm / speed) is a constant kPavedAversion / kUnpavedRefSpeed.
   const float per_km = kPavedAversion / kUnpavedRefSpeed;
   for (float speed : {25.0f, 50.0f, 100.0f}) {
@@ -369,7 +372,7 @@ TEST(PavedMultiplier, DistanceEqualizationAtFullTrails) {
 
 TEST(PavedMultiplier, SlowPavedFloorsAtAversion) {
   // ut=1.0, speed below kUnpavedRefSpeed floors at kPavedAversion (the
-  // max(1, speed/ref) guard): a slow paved lane never costs less than 1.5x.
+  // max(1, speed/ref) guard): a slow paved lane never costs less than 2.5x.
   EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 10.0f), kPavedAversion, 1e-5f);
   EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 5.0f), kPavedAversion, 1e-5f);
   EXPECT_NEAR(paved_multiplier(Surface::kPaved, 1.0f, 24.9f), kPavedAversion, 1e-5f);

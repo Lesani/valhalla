@@ -240,7 +240,7 @@ inline float toll_multiplier(bool has_toll,
 // relevant factor for adventure"). ut <= 0.5 is inert; unpaved edges
 // (Surface >= kCompacted == 3) are never penalized. Always >= 1.0.
 inline constexpr float kUnpavedRefSpeed = 25.0f; // measured corridor gravel speed
-inline constexpr float kPavedAversion = 1.5f;    // asphalt per-km premium at ut=1.0
+inline constexpr float kPavedAversion = 2.5f;    // asphalt per-km premium at ut=1.0
 
 inline float paved_multiplier(baldr::Surface surface, float use_trails, float edge_speed_kph) {
   const float ut = std::clamp(use_trails, 0.0f, 1.0f);
