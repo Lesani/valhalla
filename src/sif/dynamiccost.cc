@@ -244,6 +244,15 @@ DynamicCost::DynamicCost(const Costing& costing,
     min_linear_cost_factor_ =
         std::min(min_linear_cost_factor_, cost_factors.sort_and_find_smallest());
   }
+
+  // Preferred-trail set (patch 0019). Empty (and free) for non-motorcycle
+  // costings, which never populate the proto fields. Every factor is >= 1.0, so
+  // it only raises non-member cost and keeps the A* heuristic admissible.
+  preferred_factor_ =
+      costing.options().has_preferred_factor() ? costing.options().preferred_factor() : 1.0f;
+  for (const uint64_t id : costing.options().preferred_edges()) {
+    preferred_edges_.insert(GraphId(id));
+  }
 }
 
 DynamicCost::~DynamicCost() {

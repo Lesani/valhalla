@@ -123,6 +123,24 @@ BaseCostingOptionsConfig GetBaseCostOptsConfig() {
 
 const BaseCostingOptionsConfig kBaseCostOptsConfig = GetBaseCostOptsConfig();
 
+// Preferred-trail option (patch 0019), parsed for motorcycle + motorcycle_curvy
+// only. `/preferred_edges` = JSON array of uint64 directed-edge GraphIds;
+// `/preferred_factor` = >= 1.0 penalty on non-member edges (floored at 1.0 so
+// the cost model stays admissible). Both absent => byte-identical legacy wire.
+void ParsePreferredEdges(const rapidjson::Value& json, Costing::Options* co) {
+  if (auto edges = rapidjson::get_child_optional(json, "/preferred_edges");
+      edges && edges->IsArray()) {
+    for (const auto& e : edges->GetArray()) {
+      if (e.IsUint64()) {
+        co->add_preferred_edges(e.GetUint64());
+      }
+    }
+  }
+  if (auto f = rapidjson::get_optional<float>(json, "/preferred_factor"); f) {
+    co->set_preferred_factor(std::max(1.0f, *f));
+  }
+}
+
 } // namespace
 
 /**
@@ -487,6 +505,14 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   factor *= EdgeFactor(edgeid);
 
+  // Preferred trails (patch 0019): edges outside the per-request preferred set
+  // pay a flat >= 1.0 penalty, biasing the router onto the trail network without
+  // ever discounting below base cost. No-op when the set is empty or the factor
+  // is <= 1.0 (strength Off). Applied ONLY here in the base motorcycle EdgeCost
+  // so motorcycle_curvy inherits it through base.cost -- do NOT repeat the
+  // multiply in MotorcycleCurvyCost::EdgeCost (that would double-apply it).
+  factor *= PreferredEdgeFactor(edgeid);
+
   return {sec * factor, sec};
 }
 
@@ -642,6 +668,7 @@ void ParseMotorcycleCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kUseTollsRange, json, "/use_tolls", use_tolls, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
+  ParsePreferredEdges(json, co);
 }
 
 cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
@@ -751,6 +778,7 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   // D2 (profile character): scale the four small-road rows toward 1.0.
   JSON_PBF_RANGED_DEFAULT(co, kCurvyUseSmallRoadsRange, json, "/use_small_roads", use_small_roads,
                           warnings);
+  ParsePreferredEdges(json, co);
 }
 
 cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
@@ -956,6 +984,80 @@ TEST(MotorcycleCost, etaSpeedFloor) {
   EXPECT_LT(floored, raw); // floor makes it faster/credible
   EXPECT_NEAR(floored, 1000.0f * kSpeedFactor[25], 1e-4);
 }
+
+// ---- preferred trails (patch 0019) ----
+
+// Subclasses that expose the protected preferred-trail members + helper so the
+// unit tests can assert the parse and the multiplier without a tile.
+class TestMotorcyclePreferred : public MotorcycleCost {
+public:
+  TestMotorcyclePreferred(const Costing& c) : MotorcycleCost(c) {}
+  using DynamicCost::PreferredEdgeFactor;
+  using DynamicCost::preferred_edges_;
+  using DynamicCost::preferred_factor_;
+};
+
+class TestMotorcycleCurvyPreferred : public MotorcycleCurvyCost {
+public:
+  TestMotorcycleCurvyPreferred(const Costing& c) : MotorcycleCurvyCost(c) {}
+  using DynamicCost::PreferredEdgeFactor;
+  using DynamicCost::preferred_edges_;
+  using DynamicCost::preferred_factor_;
+};
+
+Costing parse_preferred_costing(const std::string& costing, const std::string& body) {
+  std::stringstream ss;
+  ss << R"({"costing":")" << costing << R"(","costing_options":{")" << costing << R"(":)" << body
+     << "}}";
+  Api request;
+  ParseApi(ss.str(), valhalla::Options::route, request);
+  const auto type = costing == "motorcycle" ? Costing::motorcycle : Costing::motorcycle_curvy;
+  return request.options().costings().find(type)->second;
+}
+
+TEST(MotorcycleCost, PreferredEdgesParsedAndApplied) {
+  TestMotorcyclePreferred cost(
+      parse_preferred_costing("motorcycle",
+                              R"({"preferred_edges":[12345,67890],"preferred_factor":3.0})"));
+  EXPECT_EQ(cost.preferred_edges_.size(), 2u);
+  EXPECT_FLOAT_EQ(cost.preferred_factor_, 3.0f);
+  // A registered edge pays base cost; an unregistered one pays the factor.
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(12345))), 1.0f);
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(999999))), 3.0f);
+}
+
+TEST(MotorcycleCurvyCost, PreferredEdgesInherited) {
+  // motorcycle_curvy carries the preferred set through its MotorcycleCost base
+  // (MotorcycleCurvyCost::EdgeCost multiplies base.cost, which already includes
+  // PreferredEdgeFactor). The gurka curvy path has a pre-existing crash, so the
+  // inheritance is proven here at the costing level instead.
+  TestMotorcycleCurvyPreferred cost(
+      parse_preferred_costing("motorcycle_curvy",
+                              R"({"preferred_edges":[12345,67890],"preferred_factor":3.0})"));
+  EXPECT_EQ(cost.preferred_edges_.size(), 2u);
+  EXPECT_FLOAT_EQ(cost.preferred_factor_, 3.0f);
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(12345))), 1.0f);
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(999999))), 3.0f);
+}
+
+TEST(MotorcycleCost, PreferredFactorFlooredAtOne) {
+  // A factor below 1.0 is floored to 1.0 at parse time, so the bias can only
+  // ever raise cost (admissibility) -- and a floored factor is a no-op.
+  TestMotorcyclePreferred cost(
+      parse_preferred_costing("motorcycle",
+                              R"({"preferred_edges":[12345],"preferred_factor":0.5})"));
+  EXPECT_FLOAT_EQ(cost.preferred_factor_, 1.0f);
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(999999))), 1.0f);
+}
+
+TEST(MotorcycleCost, PreferredEdgesAbsentIsNoOp) {
+  // No preferred fields -> empty set, factor 1.0, no-op multiplier.
+  TestMotorcyclePreferred cost(parse_preferred_costing("motorcycle", R"({})"));
+  EXPECT_TRUE(cost.preferred_edges_.empty());
+  EXPECT_FLOAT_EQ(cost.preferred_factor_, 1.0f);
+  EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(12345))), 1.0f);
+}
+
 } // namespace
 
 #endif

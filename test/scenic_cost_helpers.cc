@@ -20,6 +20,7 @@ using valhalla::sif::kCurvyDetourCap;
 using valhalla::sif::kPavedAversion;
 using valhalla::sif::kUnpavedRefSpeed;
 using valhalla::sif::paved_multiplier;
+using valhalla::sif::preferred_edge_multiplier;
 using valhalla::sif::scaled_class_multipliers;
 using valhalla::sif::small_road_multiplier;
 using valhalla::sif::straightness_penalty;
@@ -555,6 +556,41 @@ TEST(AdventureProfile, GravelBeatsPavedPrimaryPerKm) {
   const float gravel_per_km = cm_gravel * pm_gravel / 25.0f;
   EXPECT_GT(paved_per_km, gravel_per_km)
       << "paved_per_km=" << paved_per_km << " gravel_per_km=" << gravel_per_km;
+}
+
+// ---- preferred_edge_multiplier (patch 0019 -- preferred trails) ----
+
+TEST(PreferredEdge, MemberPaysBaseCost) {
+  // A matched trail edge always pays exactly its base cost regardless of the
+  // strength factor.
+  for (float f : {1.0f, 1.5f, 3.0f, 8.0f}) {
+    EXPECT_FLOAT_EQ(preferred_edge_multiplier(true, f), 1.0f) << "factor=" << f;
+  }
+}
+
+TEST(PreferredEdge, NonMemberPaysFactor) {
+  // An off-trail edge pays the full factor per km (Mild/Strong/Max).
+  EXPECT_FLOAT_EQ(preferred_edge_multiplier(false, 1.5f), 1.5f);
+  EXPECT_FLOAT_EQ(preferred_edge_multiplier(false, 3.0f), 3.0f);
+  EXPECT_FLOAT_EQ(preferred_edge_multiplier(false, 8.0f), 8.0f);
+}
+
+TEST(PreferredEdge, OffIsNoOp) {
+  // Strength Off (factor 1.0) is a mathematical no-op for members and
+  // non-members alike.
+  EXPECT_FLOAT_EQ(preferred_edge_multiplier(true, 1.0f), 1.0f);
+  EXPECT_FLOAT_EQ(preferred_edge_multiplier(false, 1.0f), 1.0f);
+}
+
+TEST(PreferredEdge, NeverBelowOne) {
+  // Admissibility invariant: the multiplier can only ever RAISE cost, so the
+  // A* heuristic (calibrated on base costs) stays admissible.
+  for (float f : {1.0f, 1.5f, 3.0f, 8.0f}) {
+    for (bool member : {true, false}) {
+      EXPECT_GE(preferred_edge_multiplier(member, f), 1.0f)
+          << "member=" << member << " factor=" << f;
+    }
+  }
 }
 
 } // namespace

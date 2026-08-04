@@ -252,6 +252,15 @@ inline float paved_multiplier(baldr::Surface surface, float use_trails, float ed
   return 1.0f + (pm_full - 1.0f) * t;
 }
 
+// Preferred-trail multiplier (patch 0019). Edges in the preferred set (member)
+// pay their base cost; edges outside it pay a flat `factor` per km. Admissible
+// like every other scenic factor: the result is always >= 1.0, so it can only
+// RAISE cost and never breaks the A* heuristic. `factor` <= 1.0 (strength Off)
+// is a no-op even for non-members.
+inline float preferred_edge_multiplier(bool member, float factor) {
+  return (member || factor <= 1.0f) ? 1.0f : factor;
+}
+
 } // namespace sif
 } // namespace valhalla
 

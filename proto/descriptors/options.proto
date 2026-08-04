@@ -368,6 +368,12 @@ message Costing {
     oneof has_use_small_roads {
       float use_small_roads = 99; // [0.0, 1.0] scale small-road class multipliers toward 1.0
     }
+    // preferred trails (patch 0019): directed-edge GraphIds a route should
+    // prefer; edges NOT in this set pay a flat >= 1.0 per-km penalty.
+    repeated uint64 preferred_edges = 100;
+    oneof has_preferred_factor {
+      float preferred_factor = 101; // >= 1.0 penalty on edges NOT in preferred_edges
+    }
   }
 
   oneof has_options {

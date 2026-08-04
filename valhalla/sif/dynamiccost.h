@@ -22,9 +22,12 @@
 #include <boost/container/small_vector.hpp>
 #include <proto/info.pb.h>
 
+#include <valhalla/sif/scenic_cost_helpers.h>
+
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 // macros aren't great but writing these out for every option is an abomination worse than this macro
 
@@ -1264,6 +1267,21 @@ protected:
   }
 
   /**
+   * >= 1.0 multiplier for one edge under the preferred-trail bias (patch 0019).
+   * Returns 1.0 (no-op) for members, an empty set, a factor <= 1.0 (strength
+   * Off), or an invalid edgeid (partial-edge snapping passes kInvalidGraphId,
+   * see the motorcycle_curvy guard in patch 0006); preferred_factor_ for
+   * non-members. Only the motorcycle costings populate the set, so this is free
+   * for every other costing. Applied once in MotorcycleCost::EdgeCost;
+   * motorcycle_curvy inherits it through base.cost.
+   */
+  float PreferredEdgeFactor(const baldr::GraphId& edgeid) const {
+    if (preferred_edges_.empty() || preferred_factor_ <= 1.0f || !edgeid.is_valid())
+      return 1.0f;
+    return preferred_edge_multiplier(preferred_edges_.count(edgeid) != 0, preferred_factor_);
+  }
+
+  /**
    * Calculate `track` costs based on tracks preference.
    * @param use_tracks value of tracks preference in range [0; 1]
    */
@@ -1309,6 +1327,13 @@ protected:
 
   // User specified edges to avoid with percent along (for avoiding PathEdges of locations)
   std::unordered_map<baldr::GraphId, float> user_exclude_edges_;
+
+  // Preferred-trail set (patch 0019). Directed-edge GraphIds a route should
+  // prefer; edges NOT in this set pay a flat preferred_factor_ (>= 1.0) penalty.
+  // Empty set or factor <= 1.0 is a no-op. Only the motorcycle costings populate
+  // it (see MotorcycleCost::EdgeCost / PreferredEdgeFactor).
+  std::unordered_set<baldr::GraphId> preferred_edges_;
+  float preferred_factor_ = 1.0f;
 
   // Weighting to apply to ferry edges
   float ferry_factor_, rail_ferry_factor_;
