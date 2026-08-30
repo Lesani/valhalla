@@ -588,6 +588,35 @@ void legs(valhalla::Api& api, int route_index, rapidjson::writer_wrapper_t& writ
       writer.end_array(); // elevation
     }
 
+    // better_mc_routing (patch 0020): per-edge sinuosity for the whole leg.
+    // The fork always populates TripLeg_Edge::sinuosity (0-255 curviness
+    // byte from the tile's DirectedEdgeExt record), so this array is
+    // unconditional -- no request knob, no attribute filter. Clients (the
+    // web planner's stats.js, the phone's valhalla_trip.dart) length-weight
+    // it into the route's "twisty" share and degrade to "n/a" when a leg
+    // carries no edges. `length` is in the request's distance units, like
+    // every other length in this serializer.
+    if (trip_leg_itr->node_size() > 0) {
+      const bool units_miles = api.options().units() == Options::miles;
+      writer.start_array("edges");
+      for (const auto& node : trip_leg_itr->node()) {
+        // the last trip node closes the leg and carries no edge
+        if (!node.has_edge()) {
+          break;
+        }
+        const auto& trip_edge = node.edge();
+        writer.start_object();
+        writer("sinuosity", trip_edge.sinuosity());
+        writer.set_precision(length_prec);
+        writer("length", units_miles ? trip_edge.length_km() * kMilePerKm : trip_edge.length_km());
+        writer.set_precision(tyr::kDefaultPrecision);
+        writer("begin_shape_index", trip_edge.begin_shape_index());
+        writer("end_shape_index", trip_edge.end_shape_index());
+        writer.end_object();
+      }
+      writer.end_array(); // edges
+    }
+
     writer.start_object("summary");
 
     // Does the user want admin info?

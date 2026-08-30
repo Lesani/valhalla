@@ -1427,14 +1427,18 @@ TripLeg_Edge* AddTripEdge(const AttributesController& controller,
     trip_edge->set_curvature(directededge->curvature());
   }
 
-  // Set sinuosity if requested (better_mc_routing, issue #22): the 0-255
+  // Sinuosity (better_mc_routing, issue #22 + patch 0020): the 0-255
   // curviness byte from the DirectedEdgeExt record (issue #20). Tiles built
   // without ext data report 0.
-  if (controller(kEdgeSinuosity)) {
-    trip_edge->set_sinuosity(graphtile->header()->has_ext_directededge()
-                                 ? graphtile->ext_directededge(edge)->sinuosity()
-                                 : 0);
-  }
+  //
+  // Populated UNCONDITIONALLY in this fork: the valhalla-format /route
+  // serializer emits a per-edge `sinuosity` for every leg, and the route
+  // action builds its AttributesController straight from the request, which
+  // never opts into non-default attributes. `trace_attributes` still gates
+  // its JSON emission on kEdgeSinuosity, so that output is unchanged.
+  trip_edge->set_sinuosity(graphtile->header()->has_ext_directededge()
+                               ? graphtile->ext_directededge(edge)->sinuosity()
+                               : 0);
 
   if (directededge->destonly() && controller(kEdgeDestinationOnly)) {
     trip_edge->set_destination_only(directededge->destonly());
