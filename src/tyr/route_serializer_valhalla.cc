@@ -325,6 +325,48 @@ void legs(valhalla::Api& api, int route_index, rapidjson::writer_wrapper_t& writ
         writer("bearing_after", out_brg);
       }
 
+      // Traffic light at this maneuver's junction (patch 0021).
+      //
+      // Valhalla records a junction signal on the NODE and a mid-way signal
+      // on the DirectedEdge that ENDS at it, in mutually exclusive branches
+      // of graphbuilder (src/mjolnir/graphbuilder.cc:275-289) -- so the
+      // UNION of the two flags is required, not defensive. Both attributes
+      // default to true in AttributesController (attributes_controller.cc
+      // :117, :175), so /route already carries them; nothing is gated here.
+      //
+      // Inside a large junction the maneuver often begins at the far end of
+      // a short `internal_intersection` connector, which leaves the
+      // signalised node one or two hops further back. Walk back over
+      // internal edges ONLY, bounded -- a longer walk would start claiming
+      // a light that belongs to a different junction.
+      //
+      // Emitted only when true, like `toll`/`highway` below: a false key on
+      // every maneuver is pure weight for readers that already treat
+      // "absent" as false.
+      if (!depart_maneuver &&
+          maneuver.begin_path_index() < static_cast<uint32_t>(trip_leg_itr->node_size())) {
+        constexpr uint32_t kSignalWalkBackHops = 2;
+        bool maneuver_signal = false;
+        uint32_t signal_probe = maneuver.begin_path_index();
+        for (uint32_t hop = 0; hop <= kSignalWalkBackHops && signal_probe > 0; ++hop) {
+          const auto& probe_node = trip_leg_itr->node(signal_probe);
+          const auto& into_edge = trip_leg_itr->node(signal_probe - 1).edge();
+          if (probe_node.traffic_signal() || into_edge.traffic_signal()) {
+            maneuver_signal = true;
+            break;
+          }
+          // Keep walking only while we are standing on the tail of an
+          // internal-intersection connector.
+          if (!into_edge.internal_intersection()) {
+            break;
+          }
+          --signal_probe;
+        }
+        if (maneuver_signal) {
+          writer("traffic_signal", true);
+        }
+      }
+
       // Time, length, cost, and shape indexes
       const auto& end_node = trip_leg_itr->node(maneuver.end_path_index());
       const auto& begin_node = trip_leg_itr->node(maneuver.begin_path_index());
@@ -599,7 +641,8 @@ void legs(valhalla::Api& api, int route_index, rapidjson::writer_wrapper_t& writ
     if (trip_leg_itr->node_size() > 0) {
       const bool units_miles = api.options().units() == Options::miles;
       writer.start_array("edges");
-      for (const auto& node : trip_leg_itr->node()) {
+      for (int edge_node_idx = 0; edge_node_idx < trip_leg_itr->node_size(); ++edge_node_idx) {
+        const auto& node = trip_leg_itr->node(edge_node_idx);
         // the last trip node closes the leg and carries no edge
         if (!node.has_edge()) {
           break;
@@ -607,6 +650,22 @@ void legs(valhalla::Api& api, int route_index, rapidjson::writer_wrapper_t& writ
         const auto& trip_edge = node.edge();
         writer.start_object();
         writer("sinuosity", trip_edge.sinuosity());
+        // patch 0021: signal at this edge's END -- the DirectedEdge flag
+        // (a mid-block signal is recorded on the edge that ends at it)
+        // unioned with the END node's junction flag. The end node of
+        // edge i is node i+1.
+        //
+        // KNOWN GAP: TripLegBuilder never sets traffic_signal on a leg's
+        // TRAILING node (triplegbuilder.cc:2288 writes only admin/elapsed/
+        // recosts), so the last edge of a leg reports its own flag only.
+        // Harmless: the maneuver at that node is the arrive, which never
+        // anchors.
+        const bool end_node_signal =
+            (edge_node_idx + 1 < trip_leg_itr->node_size()) &&
+            trip_leg_itr->node(edge_node_idx + 1).traffic_signal();
+        if (trip_edge.traffic_signal() || end_node_signal) {
+          writer("traffic_signal", true);
+        }
         writer.set_precision(length_prec);
         writer("length", units_miles ? trip_edge.length_km() * kMilePerKm : trip_edge.length_km());
         writer.set_precision(tyr::kDefaultPrecision);

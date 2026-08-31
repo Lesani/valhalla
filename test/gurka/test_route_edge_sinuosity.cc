@@ -54,8 +54,10 @@ std::vector<edge_record> read_edges(const rapidjson::Value& leg) {
     EXPECT_TRUE(e.HasMember("length") && e["length"].IsNumber());
     EXPECT_TRUE(e.HasMember("begin_shape_index") && e["begin_shape_index"].IsUint());
     EXPECT_TRUE(e.HasMember("end_shape_index") && e["end_shape_index"].IsUint());
-    // exactly the four keys the clients read -- keep the payload compact
-    EXPECT_EQ(e.MemberCount(), 4u);
+    // 4 keys, plus an OPTIONAL "traffic_signal" (patch 0021, emitted only
+    // on edges that end at a light) -- keep the payload compact.
+    EXPECT_GE(e.MemberCount(), 4u);
+    EXPECT_LE(e.MemberCount(), 5u);
     out.push_back({e["sinuosity"].GetUint(), e["length"].GetDouble(),
                    e["begin_shape_index"].GetUint(), e["end_shape_index"].GetUint()});
   }
