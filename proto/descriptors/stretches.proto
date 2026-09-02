@@ -17,8 +17,30 @@ message Stretch {
   uint32 road_class = 6;    // baldr::RoadClass enum value (0..7)
   float mean_sinuosity = 7; // length-weighted mean raw arc/chord (~[1.0, 3.0])
   uint32 surface = 8;       // baldr::Surface byte (0 paved_smooth .. 7 impassable); stretch is surface-homogeneous
+  // D4 radius-bucket histogram: exactly 4 bytes, the share of the stretch's
+  // curve-classified length in each Franco radius bin, x255. Bin order is
+  // <30 m / 30-60 m / 60-100 m / 100-175 m; the ">= 175 m" straight remainder
+  // is deliberately NOT carried (the shares describe the SHAPE of the
+  // curviness, `score` already carries how much of it there is). The four
+  // bytes sum to 255 up to rounding, so a neutral profile (all bucket weights
+  // 1.0) multiplies out to exactly 1.0. ALL-ZERO is the "no bucket data"
+  // sentinel -- a stretch with no curve-classified length -- and MUST be read
+  // as the neutral 1.0 factor, never as "0% in every bin".
+  bytes bucket_shares = 9;
+  // D5 interruption data (data only -- the damper ships disabled until it is
+  // separately harness-gated). Length-weighted mean of the stock per-edge
+  // DirectedEdge::density() flag, 0-15.
+  float mean_density = 10;
+  // D5: junction-ending edges per km across the stretch. See make_candidate in
+  // src/mjolnir/valhalla_extract_stretches.cc for what counts as a junction.
+  float junctions_per_km = 11;
 }
 
 message StretchCollection {
   repeated Stretch stretches = 1;
+  // stretches.bin wire-format version. 2 = D4 buckets + D5 interruption data.
+  // Loaders MUST REJECT anything != 2 (foundation mode: no dual-read path, no
+  // migration). Note that a pre-bucket bin has no such field, so it parses as
+  // 0 -- which is exactly the rejection that is wanted.
+  uint32 format_version = 2;
 }

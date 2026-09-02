@@ -67,11 +67,63 @@ std::vector<PointLL> get_edge_shape(const GraphTile& tile, const DirectedEdge* d
   return shape;
 }
 
-// Build an EdgeCandidate from a tile + DirectedEdge.
-EdgeCandidate make_candidate(const GraphTile& tile, const DirectedEdge* de) {
+// Does `de` END at a junction?
+//
+// BOUND DEFINITION (patch 0022, D5) -- a junction is a node where the rider has
+// to deal with OTHER traffic-carrying roads, not merely a shape point or a
+// dead end. At de->endnode() we count the outbound directed edges that are:
+//   - not shortcuts (levels 0/1 carry synthetic shortcut edges),
+//   - of a road-ish Use -- kRoad, kLivingStreet, kTurnChannel, i.e. exactly the
+//     Uses the seed loop admits, so driveways/paths/tracks do not create
+//     phantom junctions,
+//   - and NOT the way we came from (localedgeidx() != de->opp_local_idx()).
+// Two or more such continuations means the chain reaches a real fork/crossing.
+// Exactly one is a plain continuation of the road; zero is a dead end.
+//
+// Note this counts CONTINUATIONS, so a simple T-junction the road drives
+// straight through (one continuation + one side road) counts as a junction,
+// while a node that only splits the same road in two does not.
+bool junction_at_endnode(GraphReader& reader,
+                         const graph_tile_ptr& current_tile,
+                         const DirectedEdge* de) {
+  const GraphId end_node = de->endnode();
+  graph_tile_ptr end_tile_ptr = (end_node.tile_base() == current_tile->id())
+                                    ? current_tile
+                                    : reader.GetGraphTile(end_node);
+  if (!end_tile_ptr) {
+    return false;
+  }
+  const NodeInfo* node = end_tile_ptr->node(end_node);
+  const uint32_t opp_local_idx = de->opp_local_idx();
+  const uint32_t base_idx = node->edge_index();
+  uint32_t continuations = 0;
+  for (uint32_t i = 0; i < node->edge_count(); ++i) {
+    const DirectedEdge* out = end_tile_ptr->directededge(base_idx + i);
+    if (out->shortcut()) continue;
+    if (out->localedgeidx() == opp_local_idx) continue; // the way we came from
+    switch (out->use()) {
+      case Use::kRoad:
+      case Use::kLivingStreet:
+      case Use::kTurnChannel:
+        break;
+      default:
+        continue;
+    }
+    if (++continuations >= 2) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Build an EdgeCandidate from a tile + DirectedEdge. Needs the GraphReader
+// because the D5 junction probe may have to cross into the end node's tile.
+EdgeCandidate make_candidate(GraphReader& reader,
+                             const graph_tile_ptr& tile,
+                             const DirectedEdge* de) {
   EdgeCandidate c;
   c.length_m = de->length();
-  c.sinuosity_byte = tile.edgeinfo(de).sinuosity();
+  c.sinuosity_byte = tile->edgeinfo(de).sinuosity();
   c.road_class = de->classification();
   c.use = de->use();
   c.surface = static_cast<uint8_t>(de->surface());
@@ -79,11 +131,18 @@ EdgeCandidate make_candidate(const GraphTile& tile, const DirectedEdge* de) {
   // "Restricted access" for our purposes = the edge has any access_restriction
   // attached. We don't sub-filter — anything restricted is a hard stop.
   c.restricted_access = de->access_restriction() != 0;
-  c.shape = get_edge_shape(tile, de);
+  c.shape = get_edge_shape(*tile, de);
   // v3 curve metric (Menger radius-binning) computed from the edge shape.
   const ShapeCurve sc = compute_shape_curve(c.shape);
   c.curvy_m = sc.curvy_m;
   c.max_straight_m = sc.max_straight_m;
+  // WS-C1 side channel. The bucket histogram is computed on the 20 m
+  // arc-length resample (see kBucketResampleStepM) -- the RAW tile triples are
+  // ~6 m apart at p10 and their coordinate quantization alone fabricates
+  // 100-175 m "curves". It does NOT feed curvy_m / the gates / the score.
+  c.bucket_len_m = shape_bucket_lengths(c.shape);
+  c.density = static_cast<uint8_t>(de->density());
+  c.junction_at_end = junction_at_endnode(reader, tile, de);
   return c;
 }
 
@@ -162,7 +221,7 @@ std::vector<EdgeCandidate> grow_forward(GraphReader& reader,
   while (true) {
     if (visited.count(cur_edge_id.value)) break;
     visited.insert(cur_edge_id.value);
-    chain.push_back(make_candidate(*cur_tile, cur_de));
+    chain.push_back(make_candidate(reader, cur_tile, cur_de));
 
     if (chain.size() > 1) {
       const auto& last = chain.back();
@@ -245,6 +304,17 @@ void write_geojson(const valhalla::StretchCollection& collection,
             << R"(,"score":)" << s.score()
             << R"(,"road_class":)" << s.road_class()
             << R"(,"mean_sinuosity":)" << s.mean_sinuosity();
+    // Patch 0022 QA: the D4 histogram and the D5 interruption data, so the
+    // bucket shares can be eyeballed on a map next to the road they describe.
+    geojson << R"(,"bucket_shares":[)";
+    const std::string& shares = s.bucket_shares();
+    for (size_t k = 0; k < shares.size(); ++k) {
+      if (k > 0) geojson << ",";
+      geojson << static_cast<int>(static_cast<unsigned char>(shares[k]));
+    }
+    geojson << "]";
+    geojson << R"(,"mean_density":)" << s.mean_density()
+            << R"(,"junctions_per_km":)" << s.junctions_per_km();
     geojson << "}}";
   }
   geojson << "]}\n";
@@ -345,6 +415,13 @@ void extract_stretches(const boost::property_tree::ptree& pt,
           msg->set_road_class(static_cast<uint32_t>(s.road_class));
           msg->set_mean_sinuosity(s.mean_sinuosity_raw);
           msg->set_surface(s.surface);
+          // D4/D5 (format version 2). bucket_shares is a fixed 4-byte string,
+          // one uint8 share per radius bin, in bin order.
+          msg->set_bucket_shares(
+              std::string(reinterpret_cast<const char*>(s.bucket_shares.data()),
+                          s.bucket_shares.size()));
+          msg->set_mean_density(s.mean_density);
+          msg->set_junctions_per_km(s.junctions_per_km);
           for (const auto& p : s.polyline) {
             msg->add_polyline_lat(p.lat());
             msg->add_polyline_lon(p.lng());
@@ -359,6 +436,10 @@ void extract_stretches(const boost::property_tree::ptree& pt,
   LOG_INFO("extract_stretches: scanned " + std::to_string(tile_count) +
            " tiles, " + std::to_string(seed_count) + " seeds, emitted " +
            std::to_string(emitted_count) + " stretches.");
+
+  // Stamp the wire-format version LAST, so every writer of this file goes
+  // through one place. Loaders reject anything != kStretchFormatVersion.
+  collection.set_format_version(kStretchFormatVersion);
 
   std::filesystem::create_directories(output_dir);
   const auto out_path = output_dir / "stretches.bin";

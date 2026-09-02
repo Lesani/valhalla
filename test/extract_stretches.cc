@@ -38,6 +38,14 @@ using valhalla::mjolnir::curve_circumradius;
 using valhalla::mjolnir::curve_density;
 using valhalla::mjolnir::curve_weight_for_radius;
 using valhalla::sif::ClassMultipliers;
+// WS-C1 (patch 0022): radius-bucket histogram + interruption data.
+using valhalla::mjolnir::bucket_shares_q8;
+using valhalla::mjolnir::junctions_per_km;
+using valhalla::mjolnir::kBucketCount;
+using valhalla::mjolnir::kBucketResampleStepM;
+using valhalla::mjolnir::length_weighted_mean_density;
+using valhalla::mjolnir::resample_by_arclength;
+using valhalla::mjolnir::shape_bucket_lengths;
 
 namespace {
 
@@ -406,6 +414,185 @@ TEST(StretchExtractor, ConcatenateDedupesJointPoints) {
   // First edge has 2 points, second has 2 — but the joining point should be
   // de-duplicated, so we expect 3 points total.
   EXPECT_EQ(poly.size(), 3u);
+}
+
+// ---- WS-C1 patch 0022: 20 m resample + radius-bucket histogram ----
+
+namespace {
+
+constexpr double kPi = 3.14159265358979;
+
+// Points on a circular arc of radius R centred so the arc starts at
+// (lat0, lon0) and sweeps `sweep_rad`. `n` segments.
+std::vector<PointLL> make_arc(double radius_m, double sweep_rad, int n) {
+  const double lat0 = 47.0, lon0 = 11.0;
+  const double mlat = 111320.0, mlon = 111320.0 * std::cos(lat0 * kPi / 180.0);
+  std::vector<PointLL> arc;
+  for (int i = 0; i <= n; ++i) {
+    const double th = sweep_rad * i / n;
+    arc.emplace_back(lon0 + (radius_m / mlon) * std::sin(th),
+                     lat0 + (radius_m / mlat) * (1.0 - std::cos(th)));
+  }
+  return arc;
+}
+
+// Sum of the four CURVE bins (index 4 is the straight sink).
+float classified_length(const std::array<float, kBucketCount + 1>& bins) {
+  float sum = 0.0f;
+  for (size_t b = 0; b < kBucketCount; ++b) sum += bins[b];
+  return sum;
+}
+
+} // namespace
+
+TEST(StretchExtractor, ResampleStepsAtFixedArcLength) {
+  // One straight 1 km-ish segment resampled at 20 m: points land at
+  // 0, 20, 40 ... plus the preserved endpoint.
+  const std::vector<PointLL> line{PointLL(11.0, 47.0), PointLL(11.0132, 47.0)};
+  const double len = line[0].Distance(line[1]);
+  auto out = resample_by_arclength(line, kBucketResampleStepM);
+  const size_t expected = static_cast<size_t>(std::floor(len / kBucketResampleStepM)) + 1;
+  // +1 more if the final leftover is a real distance (endpoint preserved).
+  EXPECT_GE(out.size(), expected);
+  EXPECT_LE(out.size(), expected + 1);
+  // Every interior gap is the step, to within a centimetre.
+  for (size_t i = 0; i + 2 < out.size(); ++i) {
+    EXPECT_NEAR(out[i].Distance(out[i + 1]), kBucketResampleStepM, 0.01);
+  }
+}
+
+TEST(StretchExtractor, ResamplePreservesEndpoints) {
+  auto arc = make_arc(120.0, kPi, 7); // coarse: gaps far wider than 20 m
+  auto out = resample_by_arclength(arc, kBucketResampleStepM);
+  ASSERT_GE(out.size(), 2u);
+  EXPECT_DOUBLE_EQ(out.front().lat(), arc.front().lat());
+  EXPECT_DOUBLE_EQ(out.front().lng(), arc.front().lng());
+  EXPECT_DOUBLE_EQ(out.back().lat(), arc.back().lat());
+  EXPECT_DOUBLE_EQ(out.back().lng(), arc.back().lng());
+  // A coarse shape gains points; the resample must not shrink it here.
+  EXPECT_GT(out.size(), arc.size());
+}
+
+TEST(StretchExtractor, ResampleSkipsDegenerateShapes) {
+  // Fewer than two points: returned untouched.
+  EXPECT_TRUE(resample_by_arclength({}, kBucketResampleStepM).empty());
+  const std::vector<PointLL> one{PointLL(11.0, 47.0)};
+  EXPECT_EQ(resample_by_arclength(one, kBucketResampleStepM).size(), 1u);
+  // Two coincident points: the zero-length segment is skipped and the
+  // endpoint dedupes against the start, leaving a single point.
+  const std::vector<PointLL> dup{PointLL(11.0, 47.0), PointLL(11.0, 47.0)};
+  EXPECT_EQ(resample_by_arclength(dup, kBucketResampleStepM).size(), 1u);
+  // A non-positive step means "raw triples" -- the shape passes through.
+  auto arc = make_arc(50.0, kPi, 24);
+  EXPECT_EQ(resample_by_arclength(arc, 0.0).size(), arc.size());
+}
+
+TEST(StretchExtractor, BucketLengthsBinSyntheticCircle) {
+  // A 50 m-radius arc: every resampled triple sits on the same circle, so the
+  // Menger radius is 50 m and the length belongs to bin 1 (30-60 m).
+  auto tight = shape_bucket_lengths(make_arc(50.0, kPi, 24));
+  EXPECT_GT(tight[1], 0.0f);
+  EXPECT_GT(tight[1], tight[0] + tight[2] + tight[3] + tight[4]);
+  // A 500 m-radius arc is a sweeper past the 175 m bin edge: it all lands in
+  // the straight sink and contributes NO classified curvature.
+  auto wide = shape_bucket_lengths(make_arc(500.0, kPi / 2.0, 40));
+  EXPECT_GT(wide[4], 0.0f);
+  EXPECT_NEAR(classified_length(wide), 0.0f, 1.0f);
+}
+
+TEST(StretchExtractor, ResampleChangesSharesVsRawTriples) {
+  // The reason the 20 m resample is MANDATORY (ws_c1_gate.md section 1): a
+  // dead-straight road sampled every ~6 m with 1e-6-degree (~0.11 m)
+  // coordinate wobble has Menger radii of ~d^2/(2h) ~ 160 m, so the RAW
+  // triples file real straight into the 100-175 m curve bin. The resample
+  // must wash that out.
+  std::vector<PointLL> noisy;
+  for (int i = 0; i < 60; ++i) {
+    const double lon = 11.0 + i * 0.00008;        // ~6 m steps at lat 47
+    const double lat = 47.0 + (i % 2 ? 1e-6 : 0); // quantization wobble
+    noisy.emplace_back(lon, lat);
+  }
+  const auto raw = shape_bucket_lengths(noisy, 0.0); // 0 == no resample
+  const auto resampled = shape_bucket_lengths(noisy, kBucketResampleStepM);
+  // Raw triples fabricate curvature over most of the shape...
+  EXPECT_GT(classified_length(raw), 0.5f * raw[4]);
+  EXPECT_GT(raw[3], 0.0f);
+  // ...and the 20 m resample removes essentially all of it.
+  EXPECT_LT(classified_length(resampled), 0.05f * classified_length(raw));
+}
+
+TEST(StretchExtractor, BucketSharesQ8SumsAndStraightIsAllZero) {
+  // 100/200/300/400 m of classified curvature (plus 1000 m of straight, which
+  // must NOT dilute the shares) -> 25.5/51/76.5/102 of 255.
+  EdgeCandidate e = make_edge(2000, 200);
+  e.bucket_len_m = {100.0f, 200.0f, 300.0f, 400.0f, 1000.0f};
+  std::vector<EdgeCandidate> edges{e};
+  auto shares = bucket_shares_q8(edges);
+  int sum = 0;
+  for (size_t b = 0; b < kBucketCount; ++b) sum += shares[b];
+  EXPECT_NEAR(sum, 255, 2);
+  EXPECT_LT(shares[0], shares[1]);
+  EXPECT_LT(shares[1], shares[2]);
+  EXPECT_LT(shares[2], shares[3]);
+  EXPECT_NEAR(shares[3], 102, 1);
+  // A perfectly straight run has no classified curvature at all: the
+  // all-zero sentinel, which consumers read as the neutral 1.0 factor.
+  EdgeCandidate straight = make_edge(2000, 200);
+  straight.bucket_len_m = {0.0f, 0.0f, 0.0f, 0.0f, 2000.0f};
+  std::vector<EdgeCandidate> flat{straight};
+  auto zero = bucket_shares_q8(flat);
+  for (size_t b = 0; b < kBucketCount; ++b) EXPECT_EQ(zero[b], 0);
+}
+
+TEST(StretchExtractor, MeanDensityIsLengthWeighted) {
+  // 800 m at density 10, 200 m at density 5 -> (8000 + 1000) / 1000 = 9.
+  EdgeCandidate a = make_edge(800, 200);
+  a.density = 10;
+  EdgeCandidate b = make_edge(200, 200);
+  b.density = 5;
+  std::vector<EdgeCandidate> edges{a, b};
+  EXPECT_FLOAT_EQ(length_weighted_mean_density(edges), 9.0f);
+  // Defensive: a zero-length run reports 0 rather than dividing by zero.
+  EdgeCandidate empty_edge = make_edge(0, 200);
+  empty_edge.density = 12;
+  std::vector<EdgeCandidate> empty_run{empty_edge};
+  EXPECT_FLOAT_EQ(length_weighted_mean_density(empty_run), 0.0f);
+}
+
+TEST(StretchExtractor, JunctionsPerKmCountsForksOnly) {
+  // A 3 km chain whose middle edge ends at a fork: 1 junction / 3 km.
+  std::vector<EdgeCandidate> edges{make_edge(1000, 200), make_edge(1000, 200),
+                                   make_edge(1000, 200)};
+  edges[1].junction_at_end = true;
+  EXPECT_NEAR(junctions_per_km(edges), 1.0f / 3.0f, 1e-5f);
+  // No forks at all -> an uninterrupted road.
+  std::vector<EdgeCandidate> clean{make_edge(1000, 200), make_edge(1000, 200)};
+  EXPECT_FLOAT_EQ(junctions_per_km(clean), 0.0f);
+}
+
+TEST(StretchExtractor, FinalizeFillsBucketAndInterruptionFields) {
+  // An in-band run carrying per-edge histogram + interruption data; finalize
+  // must aggregate all three WS-C1 fields onto the emitted stretch.
+  std::vector<EdgeCandidate> edges{make_edge(1000, 200), make_edge(1000, 200),
+                                   make_edge(1000, 200)};
+  for (auto& e : edges) {
+    e.bucket_len_m = {200.0f, 100.0f, 0.0f, 0.0f, 700.0f};
+    e.density = 4;
+  }
+  edges[2].junction_at_end = true;
+  auto s = finalize(edges);
+  int sum = 0;
+  for (size_t b = 0; b < kBucketCount; ++b) sum += s.bucket_shares[b];
+  EXPECT_NEAR(sum, 255, 2);
+  EXPECT_NEAR(s.bucket_shares[0], 170, 1); // 600 of 900 classified metres
+  EXPECT_NEAR(s.bucket_shares[1], 85, 1);  // 300 of 900
+  EXPECT_EQ(s.bucket_shares[2], 0);
+  EXPECT_EQ(s.bucket_shares[3], 0);
+  EXPECT_FLOAT_EQ(s.mean_density, 4.0f);
+  EXPECT_NEAR(s.junctions_per_km, 1.0f / 3.0f, 1e-5f);
+  // The scoring path is untouched by the side channel.
+  EXPECT_FLOAT_EQ(s.score, s.mean_sinuosity_raw);
+  EXPECT_GT(s.score, 0.0f);
 }
 
 } // namespace

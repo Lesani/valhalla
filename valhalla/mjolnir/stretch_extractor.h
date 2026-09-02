@@ -7,6 +7,7 @@
 // binary at src/mjolnir/valhalla_extract_stretches.cc is the I/O wrapper.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -46,6 +47,20 @@ inline double curve_circumradius(double a, double b, double c) {
   const double d =
       std::sqrt(std::fabs((a + b + c) * (b + c - a) * (c + a - b) * (a + b - c)));
   return d == 0.0 ? std::numeric_limits<double>::infinity() : (a * b * c) / d;
+}
+
+// Radius-bin INDEX for the D4 histogram. Shares the 30/60/100/175 m
+// thresholds with curve_weight_for_radius above -- one set of constants, two
+// readings of it (a weight for the scalar density, an index for the shape of
+// the distribution). Index 4 is the ">= 175 m" straight sink: it is
+// accumulated so bin lengths add up to the shape length, but it is NOT part
+// of the four emitted shares.
+inline size_t curve_bin_for_radius(double radius_m) {
+  if (radius_m < 30.0) return 0;
+  if (radius_m < 60.0) return 1;
+  if (radius_m < 100.0) return 2;
+  if (radius_m < 175.0) return 3;
+  return 4; // straight
 }
 
 // Curve metric of a polyline shape.
@@ -95,6 +110,113 @@ inline ShapeCurve compute_shape_curve(const std::vector<midgard::PointLL>& shape
 // (weight 2.0) dominate. The scenic-road attractiveness base signal.
 inline float curve_density(const ShapeCurve& c) {
   return c.length_m > 0.0f ? c.curvy_m / c.length_m : 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// D4 radius-bucket histogram (WS-C1). The scalar density above says HOW curvy
+// a road is; the histogram says WHAT KIND of curvy -- the share of the
+// curve-classified length spent in each radius bin. Profiles multiply the
+// shares by per-bin weights, so a hairpin road and a sweeper road with the
+// same density can rank differently.
+//
+// IMPORTANT: the histogram is a SIDE CHANNEL. compute_shape_curve, curvy_m,
+// curve_density, the seed/grow/emit gates and `score` are deliberately
+// UNTOUCHED by this addition -- the emitted index composition must stay
+// identical to the pre-bucket extractor, and the Europe-wide emitted stretch
+// count (96,050) is the canary for that. If a re-extract moves that number,
+// something in this file leaked into the scoring path.
+// ---------------------------------------------------------------------------
+
+// stretches.bin wire-format version. Bumped to 2 by the D4/D5 fields.
+// Loaders MUST reject anything else (foundation mode: no dual-read path).
+inline constexpr uint32_t kStretchFormatVersion = 2;
+
+// Arc-length resample step for the histogram, in metres. MANDATORY per the
+// WS-C1 gate (validation/reports/ws_c1_gate.md section 1): Valhalla tile
+// shapes carry ~1e-6-degree (~0.11 m) coordinate quantization, and for three
+// near-collinear points spaced d apart with lateral wobble h the Menger
+// circumradius is about d^2/(2h). At the p10 native spacing of ~6 m that is
+// R ~ 163 m, so quantization noise ALONE would file dead-straight road into
+// the 100-175 m bin. At 20 m the same wobble gives R ~ 1800 m -- safely
+// straight. 20 m also sits just above the native median spacing (16.8 m), so
+// little real detail is lost, and it is fixed rather than data-dependent so
+// shares stay comparable across stretches and regions (D8).
+inline constexpr double kBucketResampleStepM = 20.0;
+
+// Number of EMITTED bins (the straight sink is not emitted).
+inline constexpr size_t kBucketCount = 4;
+
+// Walk a polyline emitting a point every `step_m` of arc length. Endpoints are
+// always kept, so the resampled shape spans the same road. Interpolation is
+// linear in lat/lon, which is exact enough at 20 m: the great-circle sagitta
+// over a 20 m chord is well under a micrometre. Shapes with fewer than two
+// points are returned unchanged. Mirrors validation/prototype_buckets.py's
+// resample_by_arclength (the gate implementation) step for step, carry
+// included, so the offline harness and the extractor agree.
+inline std::vector<midgard::PointLL>
+resample_by_arclength(const std::vector<midgard::PointLL>& shape,
+                      double step_m = kBucketResampleStepM) {
+  if (shape.size() < 2 || !(step_m > 0.0)) {
+    return shape;
+  }
+  std::vector<midgard::PointLL> out;
+  out.reserve(shape.size());
+  out.push_back(shape.front());
+  double carry = 0.0; // arc length already walked since the last emitted point
+  for (size_t i = 0; i + 1 < shape.size(); ++i) {
+    const midgard::PointLL& a = shape[i];
+    const midgard::PointLL& b = shape[i + 1];
+    const double seg = a.Distance(b);
+    if (seg <= 0.0) continue;
+    double pos = step_m - carry;
+    while (pos <= seg) {
+      const double t = pos / seg;
+      out.emplace_back(a.lng() + (b.lng() - a.lng()) * t,
+                       a.lat() + (b.lat() - a.lat()) * t);
+      pos += step_m;
+    }
+    carry = seg - (pos - step_m);
+  }
+  const midgard::PointLL& last = shape.back();
+  if (out.back().lat() != last.lat() || out.back().lng() != last.lng()) {
+    out.push_back(last);
+  }
+  return out;
+}
+
+// Per-radius-bin length of a shape, in metres. Five entries: the four curve
+// bins then the ">= 175 m" straight accumulator, so the entries sum to the
+// resampled shape length.
+//
+// Same walk as compute_shape_curve -- for each interior point the circumradius
+// of (prev, this, next) is the local radius, it applies to the two segments
+// either side of the point, and the SMALLER of two competing radii wins for a
+// segment -- but computed on the 20 m resample and keeping the per-bin length
+// instead of collapsing it into curvy_m.
+inline std::array<float, kBucketCount + 1>
+shape_bucket_lengths(const std::vector<midgard::PointLL>& shape,
+                     double step_m = kBucketResampleStepM) {
+  std::array<float, kBucketCount + 1> acc{};
+  const std::vector<midgard::PointLL> pts = resample_by_arclength(shape, step_m);
+  const size_t n = pts.size();
+  if (n < 2) {
+    return acc;
+  }
+  std::vector<double> seglen(n - 1);
+  for (size_t i = 0; i + 1 < n; ++i) {
+    seglen[i] = pts[i].Distance(pts[i + 1]);
+  }
+  std::vector<double> segrad(n - 1, std::numeric_limits<double>::infinity());
+  for (size_t i = 1; i + 1 < n; ++i) {
+    const double base = pts[i - 1].Distance(pts[i + 1]);
+    const double r = curve_circumradius(seglen[i - 1], seglen[i], base);
+    segrad[i - 1] = std::min(segrad[i - 1], r);
+    segrad[i] = std::min(segrad[i], r);
+  }
+  for (size_t i = 0; i + 1 < n; ++i) {
+    acc[curve_bin_for_radius(segrad[i])] += static_cast<float>(seglen[i]);
+  }
+  return acc;
 }
 
 // Curve-metric thresholds. Validated against the beloved-roads acceptance set:
@@ -147,6 +269,18 @@ struct EdgeCandidate {
   bool roundabout{false};          // skip — roundabouts break stretches
   bool restricted_access{false};   // skip — non-motorbike-allowed edges
   std::vector<midgard::PointLL> shape; // ordered start -> end of base edge
+  // --- appended by patch 0022 (WS-C1). Data only: nothing below participates
+  // in seeding, growth, splitting, curvy_m or score. ---
+  // D4: per-radius-bin length of this edge's 20 m-resampled shape, metres.
+  // Index 0..3 = the <30 / 30-60 / 60-100 / 100-175 m bins, index 4 = the
+  // straight sink (>= 175 m).
+  std::array<float, kBucketCount + 1> bucket_len_m{};
+  // D5: the stock per-edge DirectedEdge::density() flag (0-15, relative road
+  // density around the edge -- Valhalla's urban-ness proxy).
+  uint8_t density{0};
+  // D5: does this edge END at a junction? See make_candidate in
+  // src/mjolnir/valhalla_extract_stretches.cc for the bound definition.
+  bool junction_at_end{false};
 };
 
 // One emitted stretch: an ordered list of EdgeCandidate references plus
@@ -159,6 +293,13 @@ struct EmittedStretch {
   float score{0.0f};              // (mean_sinuosity_byte/255) * class_multiplier, normalized to [0..1]
   baldr::RoadClass road_class{baldr::RoadClass::kInvalid};
   uint8_t surface{0};             // worst (max) Surface byte across the stretch's edges
+  // --- appended by patch 0022 (WS-C1) ---
+  // D4: share of the CURVE-CLASSIFIED length in each radius bin, x255.
+  // All-zero means "no classified curvature" and consumers read that as the
+  // neutral 1.0 bucket-affinity factor.
+  std::array<uint8_t, kBucketCount> bucket_shares{};
+  float mean_density{0.0f};       // D5: length-weighted mean of density() (0-15)
+  float junctions_per_km{0.0f};   // D5: junction-ending edges per km
 };
 
 // Length-weighted mean sinuosity byte across the given edges.
@@ -174,6 +315,70 @@ inline float length_weighted_mean_sinuosity_byte(std::span<const EdgeCandidate> 
     return 0.0f;
   }
   return static_cast<float>(weighted_sum) / static_cast<float>(total_length);
+}
+
+// D4: the four emitted bucket shares for a whole edge run, quantized to uint8.
+// Per-edge bin lengths are summed over the chain span, then each of the four
+// CURVE bins is expressed as a share of the curve-classified length (the
+// straight sink is excluded, so the shares carry the SHAPE of the curviness
+// distribution and leave "how curvy overall" to the density term). Shares sum
+// to 255 up to rounding, which makes the profile normalization structural: a
+// neutral profile (all weights 1.0) scores exactly 1.0.
+//
+// All-zero out means the run has no curve-classified length at all. That is
+// the documented "no bucket data" sentinel -- consumers treat it as the
+// neutral factor 1.0, never as "0% in every bin".
+inline std::array<uint8_t, kBucketCount>
+bucket_shares_q8(std::span<const EdgeCandidate> edges) {
+  std::array<double, kBucketCount> sums{};
+  double classified = 0.0;
+  for (const auto& e : edges) {
+    for (size_t b = 0; b < kBucketCount; ++b) {
+      sums[b] += e.bucket_len_m[b];
+      classified += e.bucket_len_m[b];
+    }
+  }
+  std::array<uint8_t, kBucketCount> out{};
+  if (classified <= 0.0) {
+    return out;
+  }
+  for (size_t b = 0; b < kBucketCount; ++b) {
+    const long q = std::lround(sums[b] / classified * 255.0);
+    out[b] = static_cast<uint8_t>(std::clamp<long>(q, 0, 255));
+  }
+  return out;
+}
+
+// D5: length-weighted mean of the stock per-edge density() flag (0-15).
+// Returns 0 if the run has no length (defensive).
+inline float length_weighted_mean_density(std::span<const EdgeCandidate> edges) {
+  uint64_t weighted_sum = 0;
+  uint64_t total_length = 0;
+  for (const auto& e : edges) {
+    weighted_sum += static_cast<uint64_t>(e.length_m) * e.density;
+    total_length += e.length_m;
+  }
+  if (total_length == 0) {
+    return 0.0f;
+  }
+  return static_cast<float>(weighted_sum) / static_cast<float>(total_length);
+}
+
+// D5: junction-ending edges per kilometre across the run. The run's LAST edge
+// is counted like any other: its end node is where the stretch hands the rider
+// over to the rest of the network, which is exactly the interruption D5 wants
+// to measure. Returns 0 if the run has no length.
+inline float junctions_per_km(std::span<const EdgeCandidate> edges) {
+  uint32_t junctions = 0;
+  uint64_t total_length = 0;
+  for (const auto& e : edges) {
+    if (e.junction_at_end) junctions++;
+    total_length += e.length_m;
+  }
+  if (total_length == 0) {
+    return 0.0f;
+  }
+  return static_cast<float>(junctions) * 1000.0f / static_cast<float>(total_length);
 }
 
 // PRD-defined score:
@@ -326,6 +531,10 @@ inline EmittedStretch finalize(std::span<const EdgeCandidate> edges) {
     if (e.surface > worst) worst = e.surface;
   }
   out.surface = worst;
+  // WS-C1 side channel (D4 + D5). Data only -- score above is already final.
+  out.bucket_shares = bucket_shares_q8(edges);
+  out.mean_density = length_weighted_mean_density(edges);
+  out.junctions_per_km = junctions_per_km(edges);
   return out;
 }
 
