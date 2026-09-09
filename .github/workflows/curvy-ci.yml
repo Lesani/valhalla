@@ -53,10 +53,13 @@ jobs:
         run: |
           make -C build -j$(nproc) \
             sinuosity scenic_cost_helpers directededge attributes_controller \
-            extract_stretches
+            extract_stretches cost_inline_tests
 
       - name: Run curvy tests
         run: |
           make -C build -j$(nproc) \
             run-sinuosity run-scenic_cost_helpers run-directededge \
             run-attributes_controller run-extract_stretches
+          # cost_inline_tests has no run- target (EXCLUDE_FROM_ALL +
+          # gtest_discover_tests); invoke the binary directly.
+          ./build/test/cost_inline_tests

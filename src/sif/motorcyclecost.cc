@@ -85,6 +85,11 @@ constexpr float kDefaultCurvyUseHighways = 0.1f; // historical motorcycle_curvy 
 constexpr ranged_default_t<float> kCurvyUseHighwaysRange{0.0f, kDefaultCurvyUseHighways, 1.0f};
 constexpr float kDefaultCurvyUseTrails = 0.0f;
 constexpr ranged_default_t<float> kCurvyUseTrailsRange{0.0f, kDefaultCurvyUseTrails, 1.0f};
+// Patch 0023: motorcycle_curvy now READS use_tolls from the request. The
+// default is the 0.2 the parser used to hardcode, NOT the stock 0.5, so a
+// bare request costs tolls exactly as it did before this patch.
+constexpr float kDefaultCurvyUseTolls = 0.2f;
+constexpr ranged_default_t<float> kCurvyUseTollsRange{0.0f, kDefaultCurvyUseTolls, 1.0f};
 // D2 (profile character): use_small_roads scales the four small-road class-mult
 // rows toward 1.0. Default 0.0 keeps today's table for every profile that does
 // not send it.
@@ -758,18 +763,20 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   // Profile-rework D1: use_highways and use_trails are now LIVE knobs for
   // motorcycle_curvy — they were previously hardcoded, silently discarding
   // whatever the request sent. Absent, they fall to curvy-specific defaults
-  // (uh=0.1, ut=0.0) that preserve legacy no-options routing. use_tolls and
-  // top_speed stay hardcoded (out of D1 scope).
+  // (uh=0.1, ut=0.0) that preserve legacy no-options routing. Patch 0023 did
+  // the same for use_tolls (default 0.2); top_speed stays hardcoded.
   //   use_highways (default 0.1)  scales motorway/trunk rows + base highway_factor_
-  //   use_tolls = 0.2             ( = use_road_tolls) road-toll hard avoid;
-  //                               our toll_multiplier adds a 1.6x on top of this
-  //                               for road tolls, scenic tolls scale separately
+  //   use_tolls (default 0.2)     feeds MotorcycleCost's toll_factor_ (:378-380),
+  //                               added per tolled edge in EdgeCost (:490). Our
+  //                               toll_multiplier adds a 1.6x on top for road
+  //                               tolls; scenic tolls scale separately through
+  //                               use_scenic_tolls, which this patch leaves alone.
   //   use_trails (default 0.0)    scales the track row + base surface_factor_
   //   top_speed = 120 km/h        discourage routing into 140+ km/h motorway
   //                               edges via ETA component
   ParseBaseCostOptions(json, c, kBaseCostOptsConfig, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kCurvyUseHighwaysRange, json, "/use_highways", use_highways, warnings);
-  co->set_use_tolls(0.2f);   // unchanged (road-toll hard avoid; out of D1 scope)
+  JSON_PBF_RANGED_DEFAULT(co, kCurvyUseTollsRange, json, "/use_tolls", use_tolls, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kCurvyUseTrailsRange, json, "/use_trails", use_trails, warnings);
   co->set_top_speed(120);    // unchanged
   JSON_PBF_RANGED_DEFAULT(co, kCurvyAlphaRange, json, "/curvy_alpha", curvy_alpha, warnings);
@@ -1056,6 +1063,56 @@ TEST(MotorcycleCost, PreferredEdgesAbsentIsNoOp) {
   EXPECT_TRUE(cost.preferred_edges_.empty());
   EXPECT_FLOAT_EQ(cost.preferred_factor_, 1.0f);
   EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(12345))), 1.0f);
+}
+
+TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {
+  // Patch 0023. Before it, ParseMotorcycleCurvyCostOptions called
+  // set_use_tolls(0.2f) unconditionally and discarded the request's value,
+  // so "avoid tolls" could not reach the curvy costing at all.
+  // parse_preferred_costing (patch 0019) is the generic parse harness here.
+  EXPECT_FLOAT_EQ(parse_preferred_costing("motorcycle_curvy", R"({})").options().use_tolls(),
+                  kDefaultCurvyUseTolls);
+  EXPECT_FLOAT_EQ(
+      parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":0.0})").options().use_tolls(),
+      0.0f);
+  EXPECT_FLOAT_EQ(
+      parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":1.0})").options().use_tolls(),
+      1.0f);
+}
+
+TEST(MotorcycleCurvyCost, UseTollsAbsentKeepsTheLegacyValue) {
+  // The whole point of the curvy-specific default: a request that says
+  // nothing about tolls must cost EXACTLY as it did before patch 0023, so
+  // the shared parity vectors do not move. 0.2, not the stock 0.5.
+  EXPECT_FLOAT_EQ(kDefaultCurvyUseTolls, 0.2f);
+  EXPECT_NE(kDefaultCurvyUseTolls, kDefaultUseTolls);
+  MotorcycleCurvyCost absent(parse_preferred_costing("motorcycle_curvy", R"({})"));
+  MotorcycleCurvyCost explicit_legacy(
+      parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":0.2})"));
+  EXPECT_FLOAT_EQ(absent.toll_factor_, explicit_legacy.toll_factor_);
+}
+
+TEST(MotorcycleCurvyCost, UseTollsOutOfRangeSnapsToTheDefault) {
+  // ranged_default_t SNAPS, it does not clamp -- the same trap that made
+  // use_scenic_tolls = 0.0 land on 0.5. Pinned here so nobody "fixes" the
+  // range by widening it.
+  for (const auto* body : {R"({"use_tolls":5.0})", R"({"use_tolls":-1.0})"}) {
+    EXPECT_FLOAT_EQ(parse_preferred_costing("motorcycle_curvy", body).options().use_tolls(),
+                    kDefaultCurvyUseTolls);
+  }
+}
+
+TEST(MotorcycleCurvyCost, UseTollsReachesTheTollFactor) {
+  // Parsed is not the same as consumed. MotorcycleCost's ctor turns the
+  // knob into toll_factor_ (:378-380) and EdgeCost adds it on a tolled edge
+  // (:490); MotorcycleCurvyCost inherits both, so avoiding tolls really
+  // does get more expensive on the curvy costing.
+  MotorcycleCurvyCost avoided(parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":0.0})"));
+  MotorcycleCurvyCost legacy(parse_preferred_costing("motorcycle_curvy", R"({})"));
+  MotorcycleCurvyCost welcomed(
+      parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":1.0})"));
+  EXPECT_GT(avoided.toll_factor_, legacy.toll_factor_);
+  EXPECT_GT(legacy.toll_factor_, welcomed.toll_factor_);
 }
 
 } // namespace
