@@ -286,20 +286,55 @@ inline constexpr uint32_t kCityDensity = 9;
 // 9 pays 1+K and 11 pays 1+3K. Calibrated on the Salzburg pins (handoff
 // routing-cost, K sweep 1/1.5/2/3).
 inline constexpr float kCityAversion = 2.0f;
+// Patch 0026 (#193 fix round, F3): the graded factor is CAPPED. Uncapped,
+// density 11 paid 7x and 15 paid 15x, so a rider who lives in a city was
+// sent on a 5x detour to reach the rural network (Salzburg-Liefering ->
+// Bergheim, Sport Touring: 32.2 km instead of 6.4). Calibrated on the
+// Gneis -> Bergheim Fastest bypass and that home trip (handoff
+// routing-cost-fix, cap sweep at K = 2): every cap in [2, 4.5] keeps the
+// bypass AND the home trip at its own 6.4 km; at 4.75 and above Sport
+// Touring flips to the 32 km Freilassing detour (no in-between path), and
+// below 2 Fastest from home goes back over density 10. 3.0 = density 9's
+// own factor, the middle of that band.
+inline constexpr float kCityAversionCap = 3.0f;
 
 inline bool in_city(uint32_t density) {
   return density >= kCityDensity;
 }
 
-// The discourage-city multiplier of one edge: 1.0 outside a city and on
+// The discourage-city multiplier of one edge: 1.0 outside a city, on
 // motorway/trunk class edges (urban motorways stay the way through, owner
-// ruling B3); graded above. Always >= 1.0, so the heuristic stays
-// admissible, and soft: a destination inside a city stays reachable.
-inline float city_aversion_factor(uint32_t density, baldr::RoadClass cls, float k = kCityAversion) {
-  if (!in_city(density) || is_highway_class(cls)) {
+// ruling B3) and on ramps (patch 0026: exit ramps are often classified
+// `primary`, yet they belong to the motorway they serve); graded above and
+// capped at `cap`. Always >= 1.0, so the heuristic stays admissible, and
+// soft: a destination inside a city stays reachable.
+inline float city_aversion_factor(uint32_t density,
+                                  baldr::RoadClass cls,
+                                  bool ramp = false,
+                                  float k = kCityAversion,
+                                  float cap = kCityAversionCap) {
+  if (!in_city(density) || is_highway_class(cls) || ramp) {
     return 1.0f;
   }
-  return 1.0f + k * static_cast<float>(density - (kCityDensity - 1));
+  const float f = 1.0f + k * static_cast<float>(density - (kCityDensity - 1));
+  return std::max(1.0f, std::min(f, cap));
+}
+
+// Patch 0026 (#193 fix round, F1): "fastest in cities" must not make a
+// city CHEAPER than the countryside to a curvy route. Out of a city the
+// curvy costing charges base * sp * cm * tm * pm; a straight main road
+// (primary, the class a city's through-routes are) pays
+// sp(0) * primary = (1 + alpha * kCurvyDetourCap) * 1.76. An in-city edge
+// under city_fastest costs its fastest-preset base times that same
+// constant, so the city costs what a straight main road costs the curvy
+// rider outside (Sport Touring 3.34x, Cruiser 2.55x, Twisty Hunter 4.27x).
+// The cheaper straight-tertiary constant (sp(0) alone) still pulled Sport
+// Touring and Cruiser through Salzburg on a pass-by trip (Hallein ->
+// Mattsee, handoff routing-cost-fix). ONE constant per request, so the
+// in-city route choice among city edges stays exactly the fastest
+// preset's (a constant scale does not reorder paths). Always >= 1.0.
+inline float city_fastest_scale(float curvy_alpha, const ClassMultipliers& w) {
+  return straightness_penalty(0, curvy_alpha) * std::max(1.0f, w.primary);
 }
 
 // Preferred-trail multiplier (patch 0019). Edges in the preferred set (member)

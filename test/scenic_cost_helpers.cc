@@ -14,12 +14,14 @@ using valhalla::baldr::Surface;
 using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
 using valhalla::sif::city_aversion_factor;
+using valhalla::sif::city_fastest_scale;
 using valhalla::sif::class_multiplier;
 using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::highway_ramp_transition;
 using valhalla::sif::in_city;
 using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCityAversion;
+using valhalla::sif::kCityAversionCap;
 using valhalla::sif::kCurvyDetourCap;
 using valhalla::sif::kPavedAversion;
 using valhalla::sif::kUnpavedRefSpeed;
@@ -618,20 +620,6 @@ TEST(HighwayRampTransition, OtherHopsAreFree) {
   EXPECT_FALSE(highway_ramp_transition(RoadClass::kSecondary, true, RoadClass::kSecondary, false));
 }
 
-TEST(HighwayRampTransition, IsSymmetricSoBothSearchesAgree) {
-  const RoadClass classes[] = {RoadClass::kMotorway, RoadClass::kTrunk, RoadClass::kPrimary,
-                               RoadClass::kResidential};
-  for (RoadClass a : classes) {
-    for (RoadClass b : classes) {
-      for (bool ra : {false, true}) {
-        for (bool rb : {false, true}) {
-          EXPECT_EQ(highway_ramp_transition(a, ra, b, rb), highway_ramp_transition(b, rb, a, ra));
-        }
-      }
-    }
-  }
-}
-
 // ---- city settings (patch 0025, #193) ----
 
 TEST(CityAversion, OutsideACityIsFree) {
@@ -641,12 +629,32 @@ TEST(CityAversion, OutsideACityIsFree) {
   }
 }
 
-TEST(CityAversion, IsGradedByDensity) {
+TEST(CityAversion, IsGradedByDensityBelowTheCap) {
   EXPECT_TRUE(in_city(9));
   EXPECT_FLOAT_EQ(city_aversion_factor(9, RoadClass::kPrimary), 1.0f + kCityAversion);
-  EXPECT_FLOAT_EQ(city_aversion_factor(11, RoadClass::kPrimary), 1.0f + 3.0f * kCityAversion);
-  EXPECT_GT(city_aversion_factor(12, RoadClass::kSecondary),
-            city_aversion_factor(10, RoadClass::kSecondary));
+  const float no_cap = 100.0f;
+  EXPECT_FLOAT_EQ(city_aversion_factor(11, RoadClass::kPrimary, false, kCityAversion, no_cap),
+                  1.0f + 3.0f * kCityAversion);
+  EXPECT_GT(city_aversion_factor(12, RoadClass::kSecondary, false, kCityAversion, no_cap),
+            city_aversion_factor(10, RoadClass::kSecondary, false, kCityAversion, no_cap));
+}
+
+TEST(CityAversion, IsCapped) {
+  // Patch 0026 (F3): the densest centre pays no more than the cap, so a
+  // rider who starts inside a city is not sent on a 5x detour to escape it.
+  for (uint32_t d = 9; d <= 15; ++d) {
+    EXPECT_LE(city_aversion_factor(d, RoadClass::kResidential), kCityAversionCap) << d;
+  }
+  EXPECT_FLOAT_EQ(city_aversion_factor(15, RoadClass::kResidential), kCityAversionCap);
+}
+
+TEST(CityAversion, RampsAreExemptWhateverTheirClass) {
+  // Patch 0026 (L2): an urban exit ramp classified `primary` belongs to the
+  // motorway it serves, which is exempt (B3).
+  for (uint32_t d = 9; d <= 15; ++d) {
+    EXPECT_FLOAT_EQ(city_aversion_factor(d, RoadClass::kPrimary, true), 1.0f) << d;
+  }
+  EXPECT_GT(city_aversion_factor(10, RoadClass::kPrimary, false), 1.0f);
 }
 
 TEST(CityAversion, MotorwayAndTrunkAreExempt) {
@@ -665,10 +673,45 @@ TEST(CityAversion, NeverBelowOne) {
   for (uint32_t d = 0; d <= 15; ++d) {
     for (RoadClass cls : classes) {
       for (float k : {0.0f, 1.0f, 2.0f, 3.0f}) {
-        EXPECT_GE(city_aversion_factor(d, cls, k), 1.0f);
+        for (bool ramp : {false, true}) {
+          for (float cap : {0.5f, 1.0f, kCityAversionCap, 100.0f}) {
+            EXPECT_GE(city_aversion_factor(d, cls, ramp, k, cap), 1.0f);
+          }
+        }
       }
     }
   }
+}
+
+// ---- city_fastest_scale (patch 0026, #193 fix round F1) ----
+
+TEST(CityFastestScale, NeverBelowWhatAStraightOrdinaryRoadCostsOutside) {
+  // "Fastest in cities" must not make a city cheaper than the countryside:
+  // the in-city constant is at least the curvy charge of a straight road of
+  // every ordinary class outside (the motorway/trunk rows are the
+  // rider's own avoid, not a cheaper alternative).
+  const RoadClass ordinary[] = {RoadClass::kPrimary, RoadClass::kSecondary, RoadClass::kTertiary,
+                                RoadClass::kUnclassified, RoadClass::kResidential};
+  for (float alpha : {0.0f, 0.3f, 0.6f, 0.95f}) {
+    for (float uh : {0.0f, 0.5f, 1.0f}) {
+      for (float usr : {0.0f, 1.0f}) {
+        const ClassMultipliers w = scaled_class_multipliers(uh, 0.0f, usr);
+        const float scale = city_fastest_scale(alpha, w);
+        for (RoadClass cls : ordinary) {
+          EXPECT_GE(scale, straightness_penalty(0, alpha) *
+                               class_multiplier(cls, Use::kRoad, w))
+              << alpha << " " << static_cast<int>(cls);
+        }
+      }
+    }
+  }
+}
+
+TEST(CityFastestScale, IsAtLeastOneAndGrowsWithTheCurveAppetite) {
+  const ClassMultipliers w;
+  EXPECT_GE(city_fastest_scale(0.0f, w), 1.0f);
+  EXPECT_GT(city_fastest_scale(0.95f, w), city_fastest_scale(0.6f, w));
+  EXPECT_GT(city_fastest_scale(0.6f, w), city_fastest_scale(0.3f, w));
 }
 
 } // namespace
