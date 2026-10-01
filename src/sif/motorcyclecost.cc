@@ -728,7 +728,10 @@ public:
     // cheaper than paved. Adventure (surface_factor_ ~0, use_trails high) keeps
     // the curve preference on gravel.
     const bool unpaved = static_cast<uint8_t>(edge->surface()) >= 3;
-    const uint8_t curve_byte = (unpaved && surface_factor_ > 1.0f) ? 0 : sin_byte;
+    // Patch 0024 (#192): a ramp is not a curve worth riding -- its tight
+    // radius earns no curve reward.
+    const bool ramp = edge->use() == Use::kRamp;
+    const uint8_t curve_byte = ((unpaved && surface_factor_ > 1.0f) || ramp) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
@@ -740,6 +743,40 @@ public:
     const float pm = paved_multiplier(edge->surface(), use_trails_,
                                       static_cast<float>(edge->speed()));
     return Cost(base.cost * sp * cm * tm * pm, base.secs);
+  }
+
+  // Patch 0024 (#192): the highway-ramp transition penalty, on BOTH searches
+  // (bidirectional A* calls the forward and the reverse variant).
+  Cost TransitionCost(const baldr::DirectedEdge* edge,
+                      const baldr::NodeInfo* node,
+                      const EdgeLabel& pred,
+                      const graph_tile_ptr& tile,
+                      const std::function<LimitedGraphReader()>& reader_getter) const override {
+    Cost c = MotorcycleCost::TransitionCost(edge, node, pred, tile, reader_getter);
+    if (highway_ramp_transition(pred.classification(), pred.use() == Use::kRamp,
+                                edge->classification(), edge->use() == Use::kRamp)) {
+      c.cost += kCurvyHighwayRampPenalty;
+    }
+    return c;
+  }
+
+  Cost TransitionCostReverse(const uint32_t idx,
+                             const baldr::NodeInfo* node,
+                             const baldr::DirectedEdge* pred,
+                             const baldr::DirectedEdge* edge,
+                             const graph_tile_ptr& tile,
+                             const GraphId& pred_id,
+                             const std::function<LimitedGraphReader()>& reader_getter,
+                             const bool has_measured_speed,
+                             const InternalTurn internal_turn) const override {
+    Cost c = MotorcycleCost::TransitionCostReverse(idx, node, pred, edge, tile, pred_id,
+                                                   reader_getter, has_measured_speed,
+                                                   internal_turn);
+    if (highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
+                                edge->classification(), edge->use() == Use::kRamp)) {
+      c.cost += kCurvyHighwayRampPenalty;
+    }
+    return c;
   }
 
 protected:

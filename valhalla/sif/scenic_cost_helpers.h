@@ -252,6 +252,30 @@ inline float paved_multiplier(baldr::Surface surface, float use_trails, float ed
   return 1.0f + (pm_full - 1.0f) * t;
 }
 
+// Patch 0024 (#192): a curvy route must not leave a motorway/trunk by the
+// off-ramp only to rejoin it by the next on-ramp. The detour is class-
+// multiplier arbitrage (exit ramps are often classified `primary`, 1.76x,
+// while the mainline is `motorway`, up to 8x), not curvature, and the stock
+// ramp transition is only kTCRamp = 1.5 s. Every hop between a non-ramp
+// motorway/trunk edge and a ramp pays kCurvyHighwayRampPenalty (cost only,
+// no time): a leave-and-rejoin loop pays it twice, a genuine motorway
+// stretch once on and once off. Additive and >= 0, so admissible.
+inline constexpr float kCurvyHighwayRampPenalty = 60.0f;
+
+inline bool is_highway_class(baldr::RoadClass cls) {
+  return cls == baldr::RoadClass::kMotorway || cls == baldr::RoadClass::kTrunk;
+}
+
+// True for a transition between a non-ramp motorway/trunk edge and a ramp,
+// in either order. Symmetric, so the forward and the reverse search agree.
+inline bool highway_ramp_transition(baldr::RoadClass pred_cls,
+                                    bool pred_ramp,
+                                    baldr::RoadClass cls,
+                                    bool ramp) {
+  return (ramp && !pred_ramp && is_highway_class(pred_cls)) ||
+         (pred_ramp && !ramp && is_highway_class(cls));
+}
+
 // Preferred-trail multiplier (patch 0019). Edges in the preferred set (member)
 // pay their base cost; edges outside it pay a flat `factor` per km. Admissible
 // like every other scenic factor: the result is always >= 1.0, so it can only

@@ -15,6 +15,7 @@ using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
 using valhalla::sif::class_multiplier;
 using valhalla::sif::highway_class_multiplier;
+using valhalla::sif::highway_ramp_transition;
 using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCurvyDetourCap;
 using valhalla::sif::kPavedAversion;
@@ -589,6 +590,41 @@ TEST(PreferredEdge, NeverBelowOne) {
     for (bool member : {true, false}) {
       EXPECT_GE(preferred_edge_multiplier(member, f), 1.0f)
           << "member=" << member << " factor=" << f;
+    }
+  }
+}
+
+// ---- highway_ramp_transition (patch 0024, #192) ----
+
+TEST(HighwayRampTransition, LeavingOrJoiningAMotorwayOrTrunkByARampCounts) {
+  for (RoadClass hw : {RoadClass::kMotorway, RoadClass::kTrunk}) {
+    // off-ramp: mainline -> ramp (the ramp's own class does not matter)
+    EXPECT_TRUE(highway_ramp_transition(hw, false, RoadClass::kPrimary, true));
+    // on-ramp: ramp -> mainline
+    EXPECT_TRUE(highway_ramp_transition(RoadClass::kPrimary, true, hw, false));
+  }
+}
+
+TEST(HighwayRampTransition, OtherHopsAreFree) {
+  // ramp -> ramp inside an interchange
+  EXPECT_FALSE(highway_ramp_transition(RoadClass::kMotorway, true, RoadClass::kMotorway, true));
+  // mainline -> mainline
+  EXPECT_FALSE(highway_ramp_transition(RoadClass::kMotorway, false, RoadClass::kMotorway, false));
+  // a ramp to or from an ordinary road
+  EXPECT_FALSE(highway_ramp_transition(RoadClass::kPrimary, false, RoadClass::kPrimary, true));
+  EXPECT_FALSE(highway_ramp_transition(RoadClass::kSecondary, true, RoadClass::kSecondary, false));
+}
+
+TEST(HighwayRampTransition, IsSymmetricSoBothSearchesAgree) {
+  const RoadClass classes[] = {RoadClass::kMotorway, RoadClass::kTrunk, RoadClass::kPrimary,
+                               RoadClass::kResidential};
+  for (RoadClass a : classes) {
+    for (RoadClass b : classes) {
+      for (bool ra : {false, true}) {
+        for (bool rb : {false, true}) {
+          EXPECT_EQ(highway_ramp_transition(a, ra, b, rb), highway_ramp_transition(b, rb, a, ra));
+        }
+      }
     }
   }
 }
