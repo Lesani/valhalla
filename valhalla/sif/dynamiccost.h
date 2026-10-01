@@ -1115,9 +1115,11 @@ public:
                        const float start,
                        const float end) const {
     // pass an invalid edge id to EdgeCost to avoid applying an average factor along the whole edge
+    // Patch 0028: which also skips the preferred-trail factor, so the start and end edges were
+    // the only unscaled ones at Max and picked a different side of the road; apply it here.
     return EdgeCost(edge, baldr::GraphId(baldr::kInvalidGraphId), tile, time_info, flow_sources) *
            std::max(end - start, std::numeric_limits<float>::epsilon()) *
-           PartialEdgeFactor(edgeid, start, end);
+           PartialEdgeFactor(edgeid, start, end) * PreferredEdgeFactor(edgeid);
   };
 
   /**
@@ -1140,7 +1142,7 @@ public:
                        const float end) const {
     return EdgeCost(edge, baldr::GraphId(baldr::kInvalidGraphId), tile) *
            std::max(end - start, std::numeric_limits<float>::epsilon()) *
-           PartialEdgeFactor(edgeid, start, end);
+           PartialEdgeFactor(edgeid, start, end) * PreferredEdgeFactor(edgeid);
   };
 
   /**

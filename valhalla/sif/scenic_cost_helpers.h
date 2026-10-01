@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include <valhalla/baldr/directededge.h>
 #include <valhalla/baldr/graphconstants.h>
 
 namespace valhalla {
@@ -298,8 +299,21 @@ inline constexpr float kCityAversion = 2.0f;
 // own factor, the middle of that band.
 inline constexpr float kCityAversionCap = 3.0f;
 
-inline bool in_city(uint32_t density) {
-  return density >= kCityDensity;
+// Patch 0028: a motorway reads a lower density than the streets around it
+// (fenced, few junctions, fields and noise walls within its 2 km), so a
+// stretch that runs through a city's edge -- Salzburg's A1 at Liefering
+// reads 7-8 -- never reached 9, and "allow motorways in cities" left it
+// at the first exit. Motorway/trunk edges and ramps count as in a city from
+// 7: the urban stretches of Salzburg, Vienna, Linz, Graz and Innsbruck read
+// 7-12, open-country motorway 3-5 (A1 east of Eugendorf, A10 to Hallein).
+inline constexpr uint32_t kCityMotorwayDensity = 7;
+
+inline bool in_city(uint32_t density, baldr::RoadClass cls, bool ramp) {
+  return density >= ((is_highway_class(cls) || ramp) ? kCityMotorwayDensity : kCityDensity);
+}
+
+inline bool in_city(const baldr::DirectedEdge* edge) {
+  return in_city(edge->density(), edge->classification(), edge->use() == baldr::Use::kRamp);
 }
 
 // The discourage-city multiplier of one edge: 1.0 outside a city, on
@@ -313,7 +327,7 @@ inline float city_aversion_factor(uint32_t density,
                                   bool ramp = false,
                                   float k = kCityAversion,
                                   float cap = kCityAversionCap) {
-  if (!in_city(density) || is_highway_class(cls) || ramp) {
+  if (is_highway_class(cls) || ramp || !in_city(density, cls, ramp)) {
     return 1.0f;
   }
   const float f = 1.0f + k * static_cast<float>(density - (kCityDensity - 1));

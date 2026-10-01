@@ -19,6 +19,7 @@ using valhalla::sif::class_multiplier;
 using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::highway_ramp_transition;
 using valhalla::sif::in_city;
+using valhalla::sif::kCityMotorwayDensity;
 using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCityAversion;
 using valhalla::sif::kCityAversionCap;
@@ -624,13 +625,27 @@ TEST(HighwayRampTransition, OtherHopsAreFree) {
 
 TEST(CityAversion, OutsideACityIsFree) {
   for (uint32_t d = 0; d < 9; ++d) {
-    EXPECT_FALSE(in_city(d));
+    EXPECT_FALSE(in_city(d, RoadClass::kResidential, false));
     EXPECT_FLOAT_EQ(city_aversion_factor(d, RoadClass::kResidential), 1.0f) << d;
   }
 }
 
+TEST(CityAversion, AMotorwayIsInACityFromALowerDensity) {
+  // Patch 0028: Salzburg's A1 at Liefering reads 7-8; open-country
+  // motorway 3-5.
+  for (const auto cls : {RoadClass::kMotorway, RoadClass::kTrunk}) {
+    EXPECT_FALSE(in_city(kCityMotorwayDensity - 1, cls, false));
+    EXPECT_TRUE(in_city(kCityMotorwayDensity, cls, false));
+  }
+  // A ramp follows its motorway whatever class it was given.
+  EXPECT_TRUE(in_city(kCityMotorwayDensity, RoadClass::kPrimary, true));
+  EXPECT_FALSE(in_city(kCityMotorwayDensity, RoadClass::kPrimary, false));
+  // The motorway stays exempt from the discourage factor.
+  EXPECT_FLOAT_EQ(city_aversion_factor(kCityMotorwayDensity, RoadClass::kMotorway), 1.0f);
+}
+
 TEST(CityAversion, IsGradedByDensityBelowTheCap) {
-  EXPECT_TRUE(in_city(9));
+  EXPECT_TRUE(in_city(9, RoadClass::kPrimary, false));
   EXPECT_FLOAT_EQ(city_aversion_factor(9, RoadClass::kPrimary), 1.0f + kCityAversion);
   const float no_cap = 100.0f;
   EXPECT_FLOAT_EQ(city_aversion_factor(11, RoadClass::kPrimary, false, kCityAversion, no_cap),

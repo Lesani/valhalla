@@ -429,7 +429,7 @@ public:
   float highway_factor_; // Factor applied when road is a motorway or trunk
 
   // City settings (patch 0025, Vamoto #193). An edge is "in a city" when
-  // in_city(edge->density()). city_set_active_ swaps the four factors above
+  // in_city(edge). city_set_active_ swaps the four factors above
   // (and the ferry weighting) for the city_* ones on in-city edges.
   bool city_aversion_;
   bool city_fastest_;
@@ -442,12 +442,32 @@ public:
   float city_ferry_factor_;
   Cost city_ferry_transition_cost_;
 
+  // Patch 0028: the preferred-trail factor of the edge a transition enters.
+  // The trail bias multiplies every non-member EDGE by F; transitions left
+  // unscaled shrank to 1/F of their weight, so at Max (F 8) the 0024 ramp
+  // penalty and the turn costs no longer outweighed an off-ramp/on-ramp
+  // hop and a route with no trail nearby changed. Scaled by the same F, a
+  // route away from every trail is the strength-Off route. Forward search:
+  // a node's outgoing edges sit in its tile, so the entered edge's id is its
+  // offset there (no tile -> invalid id -> 1.0). Reverse search: pred_id is
+  // the entered edge's opposing twin, and the set holds both directions.
+  float TrailTransitionFactor(const baldr::DirectedEdge* edge, const graph_tile_ptr& tile) const {
+    if (preferred_edges_.empty() || preferred_factor_ <= 1.0f || !tile) {
+      return 1.0f;
+    }
+    const auto idx = static_cast<uint64_t>(edge - tile->directededge(0));
+    if (idx >= tile->header()->directededgecount()) {
+      return 1.0f;
+    }
+    return PreferredEdgeFactor(GraphId(tile->id().tileid(), tile->id().level(), idx));
+  }
+
   // Patch 0026: the in-city ferry entry swap of TransitionCost/Reverse. Its
   // cost part follows base_transition_cost's `shortest` rule (a shortest
   // search ignores penalties), so the swap never leaves a residue there.
   Cost CityFerryEntrySwap(const baldr::DirectedEdge* edge, Use pred_use) const {
     if (!city_set_active_ || edge->use() != Use::kFerry || pred_use == Use::kFerry ||
-        !in_city(edge->density())) {
+        !in_city(edge)) {
       return {0.0f, 0.0f};
     }
     return {(city_ferry_transition_cost_.cost - ferry_transition_cost_.cost) * !shortest_,
@@ -573,7 +593,7 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   // Patch 0025: in-city edges cost with the in-city option set when one is
   // active (setting 3 / the fastest preset of setting 2).
-  const bool city_edge = in_city(edge->density());
+  const bool city_edge = in_city(edge);
   const bool city_set = city_set_active_ && city_edge;
 
   // Special case for travel on a ferry
@@ -637,7 +657,7 @@ Cost MotorcycleCost::TransitionCost(
     const baldr::DirectedEdge* edge,
     const baldr::NodeInfo* node,
     const EdgeLabel& pred,
-    const graph_tile_ptr& /*tile*/,
+    const graph_tile_ptr& tile,
     const std::function<LimitedGraphReader()>& /*reader_getter*/) const {
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
@@ -693,6 +713,7 @@ Cost MotorcycleCost::TransitionCost(
     }
     c.cost += seconds;
   }
+  c.cost *= TrailTransitionFactor(edge, tile);
   return c;
 }
 
@@ -706,7 +727,7 @@ Cost MotorcycleCost::TransitionCostReverse(
     const baldr::DirectedEdge* pred,
     const baldr::DirectedEdge* edge,
     const graph_tile_ptr& /*tile*/,
-    const GraphId& /*pred_id*/,
+    const GraphId& pred_id,
     const std::function<LimitedGraphReader()>& /*reader_getter*/,
     const bool has_measured_speed,
     const InternalTurn /*internal_turn*/) const {
@@ -769,6 +790,7 @@ Cost MotorcycleCost::TransitionCostReverse(
     }
     c.cost += seconds;
   }
+  c.cost *= PreferredEdgeFactor(pred_id);
   return c;
 }
 
@@ -839,7 +861,7 @@ public:
     // 0026 (F1): times ONE per-request constant, the curvy costing's charge
     // for a straight main road, so a city is never cheaper than the
     // countryside around it (see city_fastest_scale).
-    const bool city_edge = in_city(edge->density());
+    const bool city_edge = in_city(edge);
     if (city_fastest_ && city_edge) {
       return Cost(base.cost * city_fastest_scale_, base.secs);
     }
@@ -896,7 +918,7 @@ public:
     // included -- waiving it made in-city interchanges a cheap detour.
     if (highway_ramp_transition(pred.classification(), pred.use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
-      c.cost += kCurvyHighwayRampPenalty;
+      c.cost += kCurvyHighwayRampPenalty * TrailTransitionFactor(edge, tile);
     }
     return c;
   }
@@ -915,7 +937,7 @@ public:
                                                    internal_turn);
     if (highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
-      c.cost += kCurvyHighwayRampPenalty;
+      c.cost += kCurvyHighwayRampPenalty * PreferredEdgeFactor(pred_id);
     }
     return c;
   }
@@ -1456,6 +1478,39 @@ TEST(MotorcycleCurvyCost, RampPenaltyAppliesInACityWithCityFastest) {
     const TransitionPair m = transition_both_ways(*stock, *earlier, *later);
     EXPECT_FLOAT_EQ(c.forward.cost - m.forward.cost, kCurvyHighwayRampPenalty);
     EXPECT_FLOAT_EQ(c.reverse.cost - m.reverse.cost, kCurvyHighwayRampPenalty);
+  }
+}
+
+TEST(MotorcycleCurvyCost, TrailFactorScalesTheRampHopLikeTheEdges) {
+  // Patch 0028: at Max (F 8) an unscaled ramp hop shrank to 1/8 of its
+  // weight against the edges and Sport Touring hopped off the A1 at
+  // Liefering. Entering a non-member edge the hop costs F times, a member
+  // edge pays it unscaled, time never changes.
+  const DirectedEdge motorway = transition_edge(baldr::RoadClass::kMotorway, baldr::Use::kRoad, 7);
+  const DirectedEdge ramp = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRamp, 7);
+  const NodeInfo node;
+  const GraphId member(static_cast<uint64_t>(12345));
+  const GraphId other(static_cast<uint64_t>(999999));
+  for (const auto* costing : {"motorcycle", "motorcycle_curvy"}) {
+    const auto make = [&](const char* body) {
+      const Costing c = parse_preferred_costing(costing, body);
+      return std::string(costing) == "motorcycle" ? CreateMotorcycleCost(c)
+                                                  : CreateMotorcycleCurvyCost(c);
+    };
+    const cost_ptr_t off = make(R"({})");
+    const cost_ptr_t max = make(R"({"preferred_edges":[12345],"preferred_factor":8.0})");
+    for (const auto& [earlier, later] :
+         {std::pair{&motorway, &ramp}, std::pair{&ramp, &motorway}}) {
+      const auto reverse = [&](const DynamicCost& cost, const GraphId& id) {
+        return cost.TransitionCostReverse(0, &node, earlier, later, nullptr, id, nullptr, false,
+                                          InternalTurn::kNoTurn);
+      };
+      const Cost base = reverse(*off, other);
+      EXPECT_GT(base.cost, 0.0f) << costing;
+      EXPECT_FLOAT_EQ(reverse(*max, other).cost, 8.0f * base.cost) << costing;
+      EXPECT_FLOAT_EQ(reverse(*max, member).cost, base.cost) << costing;
+      EXPECT_FLOAT_EQ(reverse(*max, other).secs, base.secs) << costing;
+    }
   }
 }
 
