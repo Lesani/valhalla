@@ -9,6 +9,7 @@
 #include "sif/costfactory.h"
 
 #include <boost/format.hpp>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include <test.h>
 
@@ -708,4 +709,48 @@ TEST(StandAlone, SuperTrivialExcludedConnection) {
     auto res = gurka::do_action(valhalla::Options::sources_to_targets, map, req);
     EXPECT_EQ(res.matrix().distances(0), 100000000); // kMaxCost
   }
+}
+
+// vamoto patch 0027: a level-2 bin also lists the edges of other tiles (here the
+// level-0 motorway), and a region pack need not hold those tiles. edges_in_rings
+// switched its one tile pointer to the edge's tile in place, so a missing tile
+// left it null and the next edge of the bin crashed (EXC_BAD_ACCESS at 0x28,
+// round-trip repair with exclude_polygons on an installed-cells-only phone).
+TEST(AvoidMissingTile, ExcludePolygonOverEdgesOfAMissingTile) {
+  const std::string ascii_map = R"(
+       1         2
+    M-----N-----O
+
+    A-----B-----C
+    |  4  |  3  |
+    D-----E-----F
+  )";
+  const gurka::ways ways = {
+      {"MN", {{"highway", "motorway"}, {"name", "motorway"}}},
+      {"NO", {{"highway", "motorway"}, {"name", "motorway"}}},
+      {"ABC", {{"highway", "residential"}, {"name", "north"}}},
+      {"AD", {{"highway", "residential"}, {"name", "west"}}},
+      {"BE", {{"highway", "residential"}, {"name", "middle"}}},
+      {"CF", {{"highway", "residential"}, {"name", "east"}}},
+      {"DEF", {{"highway", "residential"}, {"name", "south"}}},
+  };
+  const auto layout = gurka::detail::map_to_coordinates(ascii_map, 100, {5.1, 52.1});
+  auto map = gurka::buildtiles(layout, ways, {}, {},
+                               VALHALLA_BUILD_DIR "test/data/gurka_avoids_missing_tile");
+
+  // the pack does not hold the motorway's level-0 tile
+  const auto tile_dir = map.config.get<std::string>("mjolnir.tile_dir");
+  ASSERT_GT(std::filesystem::remove_all(tile_dir + "/0"), 0u);
+
+  std::vector<ring_bg_t> rings{{map.nodes["1"], map.nodes["2"], map.nodes["3"], map.nodes["4"],
+                                map.nodes["1"]}};
+  rapidjson::Document doc;
+  doc.SetObject();
+  auto& allocator = doc.GetAllocator();
+  auto value = get_avoid_polys(rings, allocator);
+  auto req = build_route_request(doc, allocator, {map.nodes["A"], map.nodes["C"]}, "motorcycle",
+                                 value, "/exclude_polygons");
+
+  auto route = gurka::do_action(Options::route, map, req);
+  gurka::assert::raw::expect_path(route, {"west", "south", "south", "east"});
 }

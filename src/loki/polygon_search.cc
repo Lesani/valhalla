@@ -252,18 +252,24 @@ std::unordered_set<GraphId> edges_in_rings(const Options& options,
 
   auto check_bins = [&](uint32_t tileid, const std::pair<unsigned short, std::vector<size_t>>& bin,
                         bool intersect) {
-    auto tile = reader.GetGraphTile({tileid, bin_level, 0});
-    if (!tile) {
+    const auto bin_tile = reader.GetGraphTile({tileid, bin_level, 0});
+    if (!bin_tile) {
       return;
     }
-    for (const auto& edge_id : tile->GetBin(bin.first)) {
+    for (const auto& edge_id : bin_tile->GetBin(bin.first)) {
       if (avoid_edge_ids.count(edge_id) != 0) {
         continue;
       }
+      // A bin also lists edges of other tiles (the lower hierarchy levels and
+      // neighbours' edges that cross it), and those tiles need not be loaded:
+      // a region pack holds only its own cells. Resolve every edge from the
+      // bin's tile so a missing tile skips that one edge; switching the shared
+      // pointer in place left it null and the next edge dereferenced it
+      // (vamoto patch 0027).
       // TODO: optimize the tile switching by enqueuing edges
       // from other levels & tiles and process them after this big loop
-      if (edge_id.tile_base() != tile->header()->graphid().tile_base() &&
-          !reader.GetGraphTile(edge_id, tile)) {
+      graph_tile_ptr tile = bin_tile;
+      if (!reader.GetGraphTile(edge_id, tile)) {
         continue;
       }
       const auto edge = tile->directededge(edge_id);
@@ -308,8 +314,13 @@ std::unordered_set<GraphId> edges_in_rings(const Options& options,
       }
       if (exclude) {
         avoid_edge_ids.emplace(edge_id);
-        avoid_edge_ids.emplace(
-            opp_id.is_valid() ? opp_id : reader.GetOpposingEdgeId(edge_id, opp_edge, opp_tile));
+        if (!opp_id.is_valid()) {
+          opp_id = reader.GetOpposingEdgeId(edge_id, opp_edge, opp_tile);
+        }
+        // the opposing edge is invalid when its tile is not loaded
+        if (opp_id.is_valid()) {
+          avoid_edge_ids.emplace(opp_id);
+        }
       }
     }
   };
