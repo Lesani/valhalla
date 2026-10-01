@@ -13,10 +13,13 @@ using valhalla::baldr::RoadClass;
 using valhalla::baldr::Surface;
 using valhalla::baldr::Use;
 using valhalla::sif::ClassMultipliers;
+using valhalla::sif::city_aversion_factor;
 using valhalla::sif::class_multiplier;
 using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::highway_ramp_transition;
+using valhalla::sif::in_city;
 using valhalla::sif::is_scenic_toll;
+using valhalla::sif::kCityAversion;
 using valhalla::sif::kCurvyDetourCap;
 using valhalla::sif::kPavedAversion;
 using valhalla::sif::kUnpavedRefSpeed;
@@ -624,6 +627,45 @@ TEST(HighwayRampTransition, IsSymmetricSoBothSearchesAgree) {
         for (bool rb : {false, true}) {
           EXPECT_EQ(highway_ramp_transition(a, ra, b, rb), highway_ramp_transition(b, rb, a, ra));
         }
+      }
+    }
+  }
+}
+
+// ---- city settings (patch 0025, #193) ----
+
+TEST(CityAversion, OutsideACityIsFree) {
+  for (uint32_t d = 0; d < 9; ++d) {
+    EXPECT_FALSE(in_city(d));
+    EXPECT_FLOAT_EQ(city_aversion_factor(d, RoadClass::kResidential), 1.0f) << d;
+  }
+}
+
+TEST(CityAversion, IsGradedByDensity) {
+  EXPECT_TRUE(in_city(9));
+  EXPECT_FLOAT_EQ(city_aversion_factor(9, RoadClass::kPrimary), 1.0f + kCityAversion);
+  EXPECT_FLOAT_EQ(city_aversion_factor(11, RoadClass::kPrimary), 1.0f + 3.0f * kCityAversion);
+  EXPECT_GT(city_aversion_factor(12, RoadClass::kSecondary),
+            city_aversion_factor(10, RoadClass::kSecondary));
+}
+
+TEST(CityAversion, MotorwayAndTrunkAreExempt) {
+  // Urban motorways stay the way through a city (owner ruling B3).
+  for (uint32_t d = 9; d <= 15; ++d) {
+    EXPECT_FLOAT_EQ(city_aversion_factor(d, RoadClass::kMotorway), 1.0f);
+    EXPECT_FLOAT_EQ(city_aversion_factor(d, RoadClass::kTrunk), 1.0f);
+  }
+}
+
+TEST(CityAversion, NeverBelowOne) {
+  // Admissibility: the factor only ever raises cost.
+  const RoadClass classes[] = {RoadClass::kMotorway,     RoadClass::kTrunk,       RoadClass::kPrimary,
+                               RoadClass::kSecondary,    RoadClass::kTertiary,    RoadClass::kUnclassified,
+                               RoadClass::kResidential,  RoadClass::kServiceOther};
+  for (uint32_t d = 0; d <= 15; ++d) {
+    for (RoadClass cls : classes) {
+      for (float k : {0.0f, 1.0f, 2.0f, 3.0f}) {
+        EXPECT_GE(city_aversion_factor(d, cls, k), 1.0f);
       }
     }
   }

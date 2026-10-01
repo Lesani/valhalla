@@ -146,6 +146,85 @@ void ParsePreferredEdges(const rapidjson::Value& json, Costing::Options* co) {
   }
 }
 
+// The four preference-driven factors of MotorcycleCost, as pure functions of
+// their knob so the profile set and the in-city set (patch 0025) are built
+// by the SAME formulas. Bodies are the stock constructor's, unchanged.
+
+// Factor for highway use - use a non-linear factor with values at 0.5 being neutral (factor
+// of 0). Values between 0.5 and 1 slowly decrease to a maximum of -0.125 (to slightly prefer
+// highways) while values between 0.5 to 0 slowly increase to a maximum of kMaxHighwayBiasFactor
+// to avoid/penalize highways.
+float HighwayFactor(float use_highways) {
+  if (use_highways >= 0.5f) {
+    float f = (0.5f - use_highways);
+    return f * f * f;
+  }
+  float f = 1.0f - (use_highways * 2.0f);
+  return kMaxHighwayBiasFactor * (f * f);
+}
+
+// Toll factor of 0 would indicate no adjustment to weighting for toll roads.
+// use_tolls = 1 would reduce weighting slightly (a negative delta) while
+// use_tolls = 0 would penalize (positive delta to weighting factor).
+float TollFactor(float use_tolls) {
+  return use_tolls < 0.5f ? (2.0f - 4 * use_tolls) : // ranges from 2 to 0
+             (0.5f - use_tolls) * 0.03f;             // ranges from 0 to -0.015
+}
+
+// Factor for trail use - use a non-linear factor with values at 0.5 being neutral (factor
+// of 0). Values between 0.5 and 1 slowly decrease to a maximum of -0.125 (to slightly prefer
+// trails) while values between 0.5 to 0 slowly increase to a maximum of the surfact_factor_
+// to avoid/penalize trails.
+float TrailSurfaceFactor(float use_trails) {
+  if (use_trails >= 0.5f) {
+    float f = (0.5f - use_trails);
+    return f * f * f;
+  }
+  float f = 1.0f - use_trails * 2.0f;
+  return static_cast<uint32_t>(kMaxTrailBiasFactor * (f * f));
+}
+
+// The ferry weighting of DynamicCost's constructor (dynamiccost.h), for the
+// in-city use_ferry: edge factor + entry cost.
+float FerryFactor(float use_ferry) {
+  return use_ferry < 0.5f ? 10.0f - use_ferry * 18.0f : 1.5f - use_ferry;
+}
+Cost FerryTransitionCost(float use_ferry, float ferry_cost) {
+  const float penalty =
+      use_ferry < 0.5f ? static_cast<uint32_t>(kMaxFerryPenalty * (1.0f - use_ferry * 2.0f)) : 0.0f;
+  return {ferry_cost + penalty, ferry_cost};
+}
+
+// City settings (patch 0025, Vamoto #193), parsed for motorcycle and
+// motorcycle_curvy. PRESENCE matters (any city_use_* present activates the
+// in-city set), so get_optional + clamp -- never JSON_PBF_RANGED_DEFAULT,
+// which always sets. Absent keys leave the pbf alone, so a second ParseApi
+// pass over a pre-filled request (the mobile shim's trails branch) keeps
+// the first pass's values.
+void ParseCityOptions(const rapidjson::Value& json, Costing::Options* co) {
+  if (auto v = rapidjson::get_optional<bool>(json, "/city_aversion")) {
+    co->set_city_aversion(*v);
+  }
+  if (auto v = rapidjson::get_optional<bool>(json, "/city_fastest")) {
+    co->set_city_fastest(*v);
+  }
+  if (auto v = rapidjson::get_optional<float>(json, "/city_use_highways")) {
+    co->set_city_use_highways(std::clamp(*v, 0.0f, 1.0f));
+  }
+  if (auto v = rapidjson::get_optional<float>(json, "/city_use_tolls")) {
+    co->set_city_use_tolls(std::clamp(*v, 0.0f, 1.0f));
+  }
+  if (auto v = rapidjson::get_optional<float>(json, "/city_use_ferry")) {
+    co->set_city_use_ferry(std::clamp(*v, 0.0f, 1.0f));
+  }
+  if (auto v = rapidjson::get_optional<float>(json, "/city_use_trails")) {
+    co->set_city_use_trails(std::clamp(*v, 0.0f, 1.0f));
+  }
+  if (auto v = rapidjson::get_optional<float>(json, "/city_use_scenic_tolls")) {
+    co->set_city_use_scenic_tolls(std::clamp(*v, 0.2f, 0.7f));
+  }
+}
+
 } // namespace
 
 /**
@@ -348,6 +427,20 @@ public:
   float toll_factor_;    // Factor applied when road has a toll
   float surface_factor_; // How much the surface factors are applied when using trails
   float highway_factor_; // Factor applied when road is a motorway or trunk
+
+  // City settings (patch 0025, Vamoto #193). An edge is "in a city" when
+  // in_city(edge->density()). city_set_active_ swaps the four factors above
+  // (and the ferry weighting) for the city_* ones on in-city edges.
+  bool city_aversion_;
+  bool city_fastest_;
+  bool city_set_active_;
+  float city_use_highways_;
+  float city_use_trails_;
+  float city_toll_factor_;
+  float city_surface_factor_;
+  float city_highway_factor_;
+  float city_ferry_factor_;
+  Cost city_ferry_transition_cost_;
 };
 
 // Constructor
@@ -362,44 +455,35 @@ MotorcycleCost::MotorcycleCost(const Costing& costing)
   // Get the base costs
   get_base_costs(costing);
 
-  // Preference to use highways. Is a value from 0 to 1
-  // Factor for highway use - use a non-linear factor with values at 0.5 being neutral (factor
-  // of 0). Values between 0.5 and 1 slowly decrease to a maximum of -0.125 (to slightly prefer
-  // highways) while values between 0.5 to 0 slowly increase to a maximum of kMaxHighwayBiasFactor
-  // to avoid/penalize highways.
-  float use_highways = costing_options.use_highways();
-  if (use_highways >= 0.5f) {
-    float f = (0.5f - use_highways);
-    highway_factor_ = f * f * f;
-  } else {
-    float f = 1.0f - (use_highways * 2.0f);
-    highway_factor_ = kMaxHighwayBiasFactor * (f * f);
-  }
+  // Preference to use highways, tolls and trails (each a value from 0 to 1).
+  highway_factor_ = HighwayFactor(costing_options.use_highways());
+  toll_factor_ = TollFactor(costing_options.use_tolls());
+  surface_factor_ = TrailSurfaceFactor(costing_options.use_trails());
 
-  // Set toll factor based on preference to use tolls (value from 0 to 1).
-  // Toll factor of 0 would indicate no adjustment to weighting for toll roads.
-  // use_tolls = 1 would reduce weighting slightly (a negative delta) while
-  // use_tolls = 0 would penalize (positive delta to weighting factor).
-  float use_tolls = costing_options.use_tolls();
-  toll_factor_ = use_tolls < 0.5f ? (2.0f - 4 * use_tolls) : // ranges from 2 to 0
-                     (0.5f - use_tolls) * 0.03f;             // ranges from 0 to -0.015
-
-  // Set the surface factor based on the use trails value - this is a
-  // preference to use trails/tracks/bad surface types (a value from 0 to 1).
-  float use_trails = costing_options.use_trails();
-
-  // Factor for trail use - use a non-linear factor with values at 0.5 being neutral (factor
-  // of 0). Values between 0.5 and 1 slowly decrease to a maximum of -0.125 (to slightly prefer
-  // trails) while values between 0.5 to 0 slowly increase to a maximum of the surfact_factor_
-  // to avoid/penalize trails.
-  // modulates surface factor based on use_trails
-  if (use_trails >= 0.5f) {
-    float f = (0.5f - use_trails);
-    surface_factor_ = f * f * f;
-  } else {
-    float f = 1.0f - use_trails * 2.0f;
-    surface_factor_ = static_cast<uint32_t>(kMaxTrailBiasFactor * (f * f));
-  }
+  // City settings (patch 0025). A missing member of an active in-city set
+  // falls back to the profile's own value.
+  city_aversion_ = costing_options.city_aversion();
+  city_fastest_ = costing_options.city_fastest();
+  city_set_active_ = costing_options.has_city_use_highways_case() ||
+                     costing_options.has_city_use_tolls_case() ||
+                     costing_options.has_city_use_ferry_case() ||
+                     costing_options.has_city_use_trails_case();
+  city_use_highways_ = costing_options.has_city_use_highways_case()
+                           ? costing_options.city_use_highways()
+                           : costing_options.use_highways();
+  city_use_trails_ = costing_options.has_city_use_trails_case() ? costing_options.city_use_trails()
+                                                                : costing_options.use_trails();
+  const float city_use_tolls = costing_options.has_city_use_tolls_case()
+                                   ? costing_options.city_use_tolls()
+                                   : costing_options.use_tolls();
+  const float city_use_ferry = costing_options.has_city_use_ferry_case()
+                                   ? costing_options.city_use_ferry()
+                                   : costing_options.use_ferry();
+  city_highway_factor_ = HighwayFactor(city_use_highways_);
+  city_toll_factor_ = TollFactor(city_use_tolls);
+  city_surface_factor_ = TrailSurfaceFactor(city_use_trails_);
+  city_ferry_factor_ = FerryFactor(city_use_ferry);
+  city_ferry_transition_cost_ = FerryTransitionCost(city_use_ferry, costing_options.ferry_cost());
 }
 
 // Destructor
@@ -475,10 +559,15 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
     return Cost(edge->length(), sec);
   }
 
+  // Patch 0025: in-city edges cost with the in-city option set when one is
+  // active (setting 3 / the fastest preset of setting 2).
+  const bool city_edge = in_city(edge->density());
+  const bool city_set = city_set_active_ && city_edge;
+
   // Special case for travel on a ferry
   if (edge->use() == Use::kFerry) {
     // Use the edge speed (should be the speed of the ferry)
-    return {sec * ferry_factor_, sec};
+    return {sec * (city_set ? city_ferry_factor_ : ferry_factor_), sec};
   }
 
   // ETA credibility: recompute elapsed time with a speed floor so mandatory
@@ -489,11 +578,13 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
   sec = (edge->length() * kSpeedFactor[eta_speed]);
 
   float factor = kDensityFactor[edge->density()] +
-                 highway_factor_ * kHighwayFactor[static_cast<uint32_t>(edge->classification())] +
-                 surface_factor_ * kSurfaceFactor[static_cast<uint32_t>(edge->surface())];
+                 (city_set ? city_highway_factor_ : highway_factor_) *
+                     kHighwayFactor[static_cast<uint32_t>(edge->classification())] +
+                 (city_set ? city_surface_factor_ : surface_factor_) *
+                     kSurfaceFactor[static_cast<uint32_t>(edge->surface())];
   factor += SpeedPenalty(edge, tile, time_info, flow_sources, edge_speed);
   if (edge->toll()) {
-    factor += toll_factor_;
+    factor += city_set ? city_toll_factor_ : toll_factor_;
   }
 
   if (edge->use() == Use::kTrack) {
@@ -509,6 +600,13 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
   }
 
   factor *= EdgeFactor(edgeid);
+
+  // Patch 0025 setting 1, discourage city driving: graded, >= 1.0, motorway
+  // and trunk exempt. Here in the base EdgeCost so motorcycle_curvy inherits
+  // it through base.cost, the city-fastest shortcut included.
+  if (city_aversion_ && city_edge) {
+    factor *= city_aversion_factor(edge->density(), edge->classification());
+  }
 
   // Preferred trails (patch 0019): edges outside the per-request preferred set
   // pay a flat >= 1.0 penalty, biasing the router onto the trail network without
@@ -532,6 +630,12 @@ Cost MotorcycleCost::TransitionCost(
   // destination only, alley, maneuver penalty
   uint32_t idx = pred.opp_local_idx();
   Cost c = base_transition_cost(node, edge, &pred, idx);
+  // Patch 0025: entering an in-city ferry pays the in-city use_ferry entry.
+  if (city_set_active_ && edge->use() == Use::kFerry && pred.use() != Use::kFerry &&
+      in_city(edge->density())) {
+    c -= ferry_transition_cost_;
+    c += city_ferry_transition_cost_;
+  }
   c.secs += OSRMCarTurnDuration(edge, node, idx);
 
   const auto stopimpact = edge->stopimpact(idx);
@@ -605,6 +709,12 @@ Cost MotorcycleCost::TransitionCostReverse(
   // Get the transition cost for country crossing, ferry, gate, toll booth,
   // destination only, alley, maneuver penalty
   Cost c = base_transition_cost(node, edge, pred, idx);
+  // Patch 0025: entering an in-city ferry pays the in-city use_ferry entry.
+  if (city_set_active_ && edge->use() == Use::kFerry && pred->use() != Use::kFerry &&
+      in_city(edge->density())) {
+    c -= ferry_transition_cost_;
+    c += city_ferry_transition_cost_;
+  }
   c.secs += OSRMCarTurnDuration(edge, node, pred->opp_local_idx());
 
   const auto stopimpact = edge->stopimpact(idx);
@@ -674,6 +784,7 @@ void ParseMotorcycleCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
   ParsePreferredEdges(json, co);
+  ParseCityOptions(json, co);
 }
 
 cost_ptr_t CreateMotorcycleCost(const Costing& costing_options) {
@@ -700,6 +811,13 @@ public:
     const float usr = costing_options.options().use_small_roads();
     use_trails_ = ut;
     class_mult_ = scaled_class_multipliers(uh, ut, usr);
+    // Patch 0025: the in-city table, from the in-city use_highways /
+    // use_trails (the profile's when the request sent none) and the
+    // profile's use_small_roads.
+    city_class_mult_ = scaled_class_multipliers(city_use_highways_, city_use_trails_, usr);
+    city_use_scenic_tolls_ = costing_options.options().has_city_use_scenic_tolls_case()
+                                 ? costing_options.options().city_use_scenic_tolls()
+                                 : use_scenic_tolls_;
   }
 
   Cost EdgeCost(const baldr::DirectedEdge* edge,
@@ -708,6 +826,14 @@ public:
                 const baldr::TimeInfo& time_info,
                 uint8_t& flow_sources) const override {
     Cost base = MotorcycleCost::EdgeCost(edge, edgeid, tile, time_info, flow_sources);
+    // Patch 0025 setting 2: inside a city the route costs like the fastest
+    // preset -- the base motorcycle cost (already on the in-city factor set,
+    // the discourage-city factor included), no curvy multipliers.
+    const bool city_edge = in_city(edge->density());
+    if (city_fastest_ && city_edge) {
+      return base;
+    }
+    const bool city_set = city_set_active_ && city_edge;
     // Issue #20 — hot path: read the sinuosity byte from the DirectedEdgeExt
     // record (plain pointer arithmetic) instead of tile->edgeinfo(edge),
     // which re-parses the tagged values (hash map build) per EdgeCost call.
@@ -731,16 +857,19 @@ public:
     // Patch 0024 (#192): a ramp is not a curve worth riding -- its tight
     // radius earns no curve reward.
     const bool ramp = edge->use() == Use::kRamp;
-    const uint8_t curve_byte = ((unpaved && surface_factor_ > 1.0f) || ramp) ? 0 : sin_byte;
+    const float surface_factor = city_set ? city_surface_factor_ : surface_factor_;
+    const uint8_t curve_byte = ((unpaved && surface_factor > 1.0f) || ramp) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
     const float sp = straightness_penalty(curve_byte, curvy_alpha_);
-    const float cm = class_multiplier(edge->classification(), edge->use(), class_mult_);
-    const float tm = toll_multiplier(edge->toll(), edge->classification(), use_scenic_tolls_);
+    const float cm = class_multiplier(edge->classification(), edge->use(),
+                                      city_set ? city_class_mult_ : class_mult_);
+    const float tm = toll_multiplier(edge->toll(), edge->classification(),
+                                     city_set ? city_use_scenic_tolls_ : use_scenic_tolls_);
     // D1 rev.2: speed-equalized paved penalty (adventure detours onto gravel).
     // Uses the tile's assigned speed (deterministic, traffic-free).
-    const float pm = paved_multiplier(edge->surface(), use_trails_,
+    const float pm = paved_multiplier(edge->surface(), city_set ? city_use_trails_ : use_trails_,
                                       static_cast<float>(edge->speed()));
     return Cost(base.cost * sp * cm * tm * pm, base.secs);
   }
@@ -753,7 +882,10 @@ public:
                       const graph_tile_ptr& tile,
                       const std::function<LimitedGraphReader()>& reader_getter) const override {
     Cost c = MotorcycleCost::TransitionCost(edge, node, pred, tile, reader_getter);
-    if (highway_ramp_transition(pred.classification(), pred.use() == Use::kRamp,
+    // In-city with setting 2 the transition is the fastest preset's: no
+    // curvy ramp penalty.
+    if (!(city_fastest_ && in_city(edge->density())) &&
+        highway_ramp_transition(pred.classification(), pred.use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
       c.cost += kCurvyHighwayRampPenalty;
     }
@@ -772,7 +904,8 @@ public:
     Cost c = MotorcycleCost::TransitionCostReverse(idx, node, pred, edge, tile, pred_id,
                                                    reader_getter, has_measured_speed,
                                                    internal_turn);
-    if (highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
+    if (!(city_fastest_ && in_city(edge->density())) &&
+        highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
       c.cost += kCurvyHighwayRampPenalty;
     }
@@ -784,6 +917,9 @@ protected:
   float use_scenic_tolls_;
   float use_trails_;             // D1 rev.2: scalar for the per-edge paved_multiplier
   ClassMultipliers class_mult_; // compile-time defaults, see scenic_cost_helpers.h
+  // Patch 0025: the in-city counterparts (used only when city_set_active_).
+  ClassMultipliers city_class_mult_;
+  float city_use_scenic_tolls_;
 };
 
 void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
@@ -823,6 +959,7 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kCurvyUseSmallRoadsRange, json, "/use_small_roads", use_small_roads,
                           warnings);
   ParsePreferredEdges(json, co);
+  ParseCityOptions(json, co);
 }
 
 cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
@@ -1150,6 +1287,80 @@ TEST(MotorcycleCurvyCost, UseTollsReachesTheTollFactor) {
       parse_preferred_costing("motorcycle_curvy", R"({"use_tolls":1.0})"));
   EXPECT_GT(avoided.toll_factor_, legacy.toll_factor_);
   EXPECT_GT(legacy.toll_factor_, welcomed.toll_factor_);
+}
+
+// ---- city settings (patch 0025, Vamoto #193) ----
+
+TEST(MotorcycleCost, CityKeysAbsentLeaveTheCostingAsBefore) {
+  // No city key: the in-city set is inactive, both flags off, and the
+  // profile factors are exactly what they were.
+  for (const auto* costing : {"motorcycle", "motorcycle_curvy"}) {
+    const Costing c = parse_preferred_costing(costing, R"({"use_highways":0.3,"use_tolls":0.1})");
+    EXPECT_FALSE(c.options().has_city_use_highways_case());
+    EXPECT_FALSE(c.options().has_city_aversion_case());
+    MotorcycleCost cost(c);
+    EXPECT_FALSE(cost.city_set_active_);
+    EXPECT_FALSE(cost.city_aversion_);
+    EXPECT_FALSE(cost.city_fastest_);
+    // An inactive set mirrors the profile, so nothing can differ by accident.
+    EXPECT_FLOAT_EQ(cost.city_highway_factor_, cost.highway_factor_);
+    EXPECT_FLOAT_EQ(cost.city_toll_factor_, cost.toll_factor_);
+    EXPECT_FLOAT_EQ(cost.city_surface_factor_, cost.surface_factor_);
+  }
+}
+
+TEST(MotorcycleCost, AnyCityUseKeyActivatesTheSet) {
+  for (const auto* body : {R"({"city_use_highways":1.0})", R"({"city_use_tolls":1.0})",
+                           R"({"city_use_ferry":1.0})", R"({"city_use_trails":0.0})"}) {
+    MotorcycleCost cost(parse_preferred_costing("motorcycle_curvy", body));
+    EXPECT_TRUE(cost.city_set_active_) << body;
+  }
+}
+
+TEST(MotorcycleCost, CityFactorsUseTheStockFormulas) {
+  // city_use_highways 1.0 in a curvy request that avoids motorways outside:
+  // the in-city factor equals the one a request with use_highways 1.0 gets.
+  MotorcycleCost city(parse_preferred_costing(
+      "motorcycle_curvy",
+      R"({"use_highways":0.0,"use_tolls":0.0,"city_use_highways":1.0,"city_use_tolls":1.0})"));
+  MotorcycleCost open(
+      parse_preferred_costing("motorcycle_curvy", R"({"use_highways":1.0,"use_tolls":1.0})"));
+  EXPECT_FLOAT_EQ(city.city_highway_factor_, open.highway_factor_);
+  EXPECT_FLOAT_EQ(city.city_toll_factor_, open.toll_factor_);
+  EXPECT_GT(city.highway_factor_, city.city_highway_factor_);
+  EXPECT_GT(city.toll_factor_, city.city_toll_factor_);
+}
+
+TEST(MotorcycleCost, CityValuesAreClampedNotSnapped) {
+  // Presence is the signal, so an out-of-range value clamps to the edge of
+  // the range instead of snapping to a default.
+  const Costing c = parse_preferred_costing(
+      "motorcycle_curvy",
+      R"({"city_use_highways":1.5,"city_use_tolls":-1.0,"city_use_scenic_tolls":0.0})");
+  EXPECT_FLOAT_EQ(c.options().city_use_highways(), 1.0f);
+  EXPECT_FLOAT_EQ(c.options().city_use_tolls(), 0.0f);
+  EXPECT_FLOAT_EQ(c.options().city_use_scenic_tolls(), 0.2f);
+}
+
+TEST(MotorcycleCost, CityFlagsParse) {
+  MotorcycleCost on(parse_preferred_costing("motorcycle_curvy",
+                                            R"({"city_aversion":true,"city_fastest":true})"));
+  EXPECT_TRUE(on.city_aversion_);
+  EXPECT_TRUE(on.city_fastest_);
+  MotorcycleCost off(parse_preferred_costing("motorcycle",
+                                             R"({"city_aversion":false,"city_fastest":false})"));
+  EXPECT_FALSE(off.city_aversion_);
+  EXPECT_FALSE(off.city_fastest_);
+}
+
+TEST(MotorcycleCost, CityFerryFollowsTheInCityUseFerry) {
+  MotorcycleCost cost(
+      parse_preferred_costing("motorcycle", R"({"use_ferry":0.0,"city_use_ferry":0.5})"));
+  TestMotorcycleCost neutral(parse_preferred_costing("motorcycle", R"({"use_ferry":0.5})"));
+  TestMotorcycleCost avoided(parse_preferred_costing("motorcycle", R"({"use_ferry":0.0})"));
+  EXPECT_FLOAT_EQ(cost.city_ferry_factor_, 1.0f);
+  EXPECT_FLOAT_EQ(cost.city_ferry_transition_cost_.cost, neutral.ferry_transition_cost_.cost);
+  EXPECT_GT(avoided.ferry_transition_cost_.cost, cost.city_ferry_transition_cost_.cost);
 }
 
 } // namespace

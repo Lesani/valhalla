@@ -374,6 +374,30 @@ message Costing {
     oneof has_preferred_factor {
       float preferred_factor = 101; // >= 1.0 penalty on edges NOT in preferred_edges
     }
+    // city settings (patch 0025, Vamoto #193): per-edge "in a city" means
+    // edge density >= 9. Absent = byte-identical behaviour.
+    oneof has_city_aversion {
+      bool city_aversion = 102; // in-city non-motorway/trunk edges cost more
+    }
+    oneof has_city_fastest {
+      bool city_fastest = 103; // motorcycle_curvy: in-city edges skip the curvy multipliers
+    }
+    // The in-city option set; ANY of the four present activates it.
+    oneof has_city_use_highways {
+      float city_use_highways = 104; // [0, 1]
+    }
+    oneof has_city_use_tolls {
+      float city_use_tolls = 105; // [0, 1]
+    }
+    oneof has_city_use_ferry {
+      float city_use_ferry = 106; // [0, 1]
+    }
+    oneof has_city_use_trails {
+      float city_use_trails = 107; // [0, 1]
+    }
+    oneof has_city_use_scenic_tolls {
+      float city_use_scenic_tolls = 108; // [0.2, 0.7], motorcycle_curvy only
+    }
   }
 
   oneof has_options {

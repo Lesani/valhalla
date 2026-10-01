@@ -276,6 +276,32 @@ inline bool highway_ramp_transition(baldr::RoadClass pred_cls,
          (pred_ramp && !ramp && is_highway_class(cls));
 }
 
+// Patch 0025 (#193): city settings. "In a city" is decided per edge from
+// the stock mjolnir density (0..15, road km per km^2 within 2 km, the
+// average of the edge's two end nodes) -- the same threshold as Valhalla's
+// own is_urban (density > kMaxRuralDensity 8). No tile change: every tile,
+// server and on-device, already carries it.
+inline constexpr uint32_t kCityDensity = 9;
+// Discourage city driving: graded factor 1 + K * (density - 8), so density
+// 9 pays 1+K and 11 pays 1+3K. Calibrated on the Salzburg pins (handoff
+// routing-cost, K sweep 1/1.5/2/3).
+inline constexpr float kCityAversion = 2.0f;
+
+inline bool in_city(uint32_t density) {
+  return density >= kCityDensity;
+}
+
+// The discourage-city multiplier of one edge: 1.0 outside a city and on
+// motorway/trunk class edges (urban motorways stay the way through, owner
+// ruling B3); graded above. Always >= 1.0, so the heuristic stays
+// admissible, and soft: a destination inside a city stays reachable.
+inline float city_aversion_factor(uint32_t density, baldr::RoadClass cls, float k = kCityAversion) {
+  if (!in_city(density) || is_highway_class(cls)) {
+    return 1.0f;
+  }
+  return 1.0f + k * static_cast<float>(density - (kCityDensity - 1));
+}
+
 // Preferred-trail multiplier (patch 0019). Edges in the preferred set (member)
 // pay their base cost; edges outside it pay a flat `factor` per km. Admissible
 // like every other scenic factor: the result is always >= 1.0, so it can only
