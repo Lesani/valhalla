@@ -411,6 +411,16 @@ message Costing {
     oneof has_corridor_max {
       float corridor_max = 112;
     }
+    // in-request reuse penalty (patch 0030): on a multi-leg route every
+    // finished leg's edges (both directions) cost reuse_factor (>= 1) on the
+    // later legs, except edges ending within reuse_clear metres of the first
+    // location.
+    oneof has_reuse_factor {
+      float reuse_factor = 113;
+    }
+    oneof has_reuse_clear {
+      float reuse_clear = 114;
+    }
   }
 
   oneof has_options {

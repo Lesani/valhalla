@@ -245,6 +245,14 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto m = rapidjson::get_optional<float>(json, "/corridor_max"); m) {
     co->set_corridor_max(std::max(1.0f, *m));
   }
+  // Patch 0030: /reuse_factor (>= 1) and /reuse_clear (m) for multi-leg
+  // requests (see thor route_action add_reused_edges).
+  if (auto r = rapidjson::get_optional<float>(json, "/reuse_factor"); r) {
+    co->set_reuse_factor(std::max(1.0f, *r));
+  }
+  if (auto c = rapidjson::get_optional<float>(json, "/reuse_clear"); c) {
+    co->set_reuse_clear(std::max(0.0f, *c));
+  }
 }
 
 } // namespace
@@ -673,7 +681,7 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   // Loop guidance (patch 0029): >= 1.0, so motorcycle_curvy inherits it
   // through base.cost exactly once (same rule as the trail factor above).
-  factor *= LoopGuidanceFactor(edge, tile);
+  factor *= LoopGuidanceFactor(edge, edgeid, tile);
 
   return {sec * factor, sec};
 }

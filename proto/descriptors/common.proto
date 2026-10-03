@@ -168,6 +168,18 @@ message Location {
   oneof has_minimum_outbound_reachability {
     uint32 minimum_outbound_reachability = 32;
   }
+  // Gate (patch 0030, Vamoto #209): a short line across the route through
+  // `ll`, perpendicular to gate_heading, gate_radius metres each side. The
+  // location correlates to EVERY through edge crossing that line in the
+  // gate_heading direction (dead-end entries and shortcuts excluded), so a
+  // leg ends wherever the cheapest road crosses it. As a through location
+  // the next leg continues on that same edge in the same direction.
+  oneof has_gate_heading {
+    uint32 gate_heading = 40; // 0-359, direction of travel through the gate
+  }
+  oneof has_gate_radius {
+    uint32 gate_radius = 41; // metres each side of ll
+  }
   // This information will be ignored if provided in the request. Instead it will be filled in as the request is handled
   Correlation correlation = 90;
   string time_zone_offset = 91;

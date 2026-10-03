@@ -263,6 +263,13 @@ void parse_location(valhalla::Location* location,
   if (radius) {
     location->set_radius(*radius);
   }
+  // Gate (patch 0030): both keys or neither.
+  auto gate_heading = rapidjson::get_optional<unsigned int>(r_loc, "/gate_heading");
+  auto gate_radius = rapidjson::get_optional<unsigned int>(r_loc, "/gate_radius");
+  if (gate_heading && gate_radius && *gate_radius > 0) {
+    location->set_gate_heading(*gate_heading % 360);
+    location->set_gate_radius(*gate_radius);
+  }
   auto accuracy = rapidjson::get_optional<unsigned int>(r_loc, "/accuracy");
   if (accuracy) {
     location->set_accuracy(*accuracy);

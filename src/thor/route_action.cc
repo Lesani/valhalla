@@ -309,6 +309,53 @@ void add_cost_factor_edges(const sif::mode_costing_t& costing,
   }
 }
 
+/**
+ * In-request reuse penalty (patch 0030, Vamoto #209). After a leg of a
+ * multi-leg request, its edges -- both directions, and the constituents of a
+ * shortcut it used -- cost reuse_factor() on every later leg, so a loop does
+ * not ride the same road back. Edges ending within reuse_clear() metres of the
+ * first location are exempt (the way out of and back into the start). A base
+ * edge's covering shortcut is NOT added: loop requests run without hierarchy
+ * pruning, where shortcuts are not expanded.
+ */
+void add_reused_edges(const std::vector<thor::PathInfo>& path,
+                      sif::DynamicCost& cost,
+                      baldr::GraphReader& reader,
+                      const midgard::PointLL& start) {
+  if (cost.reuse_factor() <= 1.0f) {
+    return;
+  }
+  const float clear = cost.reuse_clear();
+  graph_tile_ptr tile;
+  auto add_both = [&](const GraphId& id) {
+    cost.AddReusedEdge(id);
+    const auto opp = reader.GetOpposingEdgeId(id);
+    if (opp.is_valid()) {
+      cost.AddReusedEdge(opp);
+    }
+  };
+  for (const auto& pi : path) {
+    const GraphId id = pi.edgeid;
+    if (!reader.GetGraphTile(id, tile)) {
+      continue;
+    }
+    const auto* edge = tile->directededge(id);
+    if (clear > 0.0f) {
+      graph_tile_ptr end_tile = tile;
+      const auto* node = reader.GetEndNode(edge, end_tile);
+      if (node && node->latlng(end_tile->header()->base_ll()).Distance(start) < clear) {
+        continue;
+      }
+    }
+    add_both(id);
+    if (edge->is_shortcut()) {
+      for (const auto& c : reader.RecoverShortcut(id)) {
+        add_both(c);
+      }
+    }
+  }
+}
+
 } // namespace
 
 namespace valhalla {
@@ -822,6 +869,11 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
 
       last_edge = temp_path.back().edgeid;
 
+      // Patch 0030: the later legs of this request pay for riding it again.
+      add_reused_edges(temp_path, *mode_costing[static_cast<uint32_t>(mode)], *reader,
+                       midgard::PointLL(options.locations(0).ll().lng(),
+                                        options.locations(0).ll().lat()));
+
       // Merge through legs by updating the time and splicing the lists
       if (!path.empty()) {
         auto offset = path.back().elapsed_cost;
@@ -908,6 +960,7 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
         // over from the beginning doing all the legs over
         route = nullptr;
         last_edge = {};
+        mode_costing[static_cast<uint32_t>(mode)]->ClearReusedEdges();
         edge_trimming.clear();
         path.clear();
         algorithms.clear();

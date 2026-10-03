@@ -1305,12 +1305,39 @@ protected:
    * around the request's guide polyline. 1.0 when no layer is active.
    */
   float LoopGuidanceFactor(const baldr::DirectedEdge* edge,
+                           const baldr::GraphId& edgeid,
                            const baldr::graph_tile_ptr& tile) const {
-    if (!corridor_ || !tile) {
-      return 1.0f;
+    float f = 1.0f;
+    // Patch 0030: an edge an earlier leg of this request already rode.
+    if (!reused_edges_.empty() && edgeid.is_valid() && reused_edges_.count(edgeid) != 0) {
+      f *= reuse_factor_;
     }
-    return corridor_->factor(GuidanceLL(edge, tile));
+    if (corridor_ && tile) {
+      f *= corridor_->factor(GuidanceLL(edge, tile));
+    }
+    return f;
   }
+
+public:
+  /**
+   * In-request reuse penalty (patch 0030). thor adds every finished leg's
+   * edges here when reuse_factor() > 1; the later legs of the same request
+   * then pay reuse_factor() on them.
+   */
+  float reuse_factor() const {
+    return reuse_factor_;
+  }
+  float reuse_clear() const {
+    return reuse_clear_;
+  }
+  void AddReusedEdge(const baldr::GraphId& edgeid) {
+    reused_edges_.insert(edgeid);
+  }
+  void ClearReusedEdges() {
+    reused_edges_.clear();
+  }
+
+protected:
 
   /**
    * Calculate `track` costs based on tracks preference.
@@ -1369,6 +1396,10 @@ protected:
   // Loop guidance (patch 0029): the corridor grid, built once per request from
   // Costing.Options.corridor_*; null when no corridor was sent.
   std::shared_ptr<const CorridorGrid> corridor_;
+  // In-request reuse penalty (patch 0030); filled by thor between legs.
+  std::unordered_set<baldr::GraphId> reused_edges_;
+  float reuse_factor_ = 1.0f;
+  float reuse_clear_ = 0.0f;
 
   // Weighting to apply to ferry edges
   float ferry_factor_, rail_ferry_factor_;

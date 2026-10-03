@@ -266,6 +266,9 @@ DynamicCost::DynamicCost(const Costing& costing,
           co.has_corridor_max() ? co.corridor_max() : 3.0f);
     }
   }
+  // In-request reuse penalty (patch 0030); the set itself is filled by thor.
+  reuse_factor_ = co.has_reuse_factor() ? std::max(1.0f, co.reuse_factor()) : 1.0f;
+  reuse_clear_ = co.has_reuse_clear() ? std::max(0.0f, co.reuse_clear()) : 0.0f;
 }
 
 DynamicCost::~DynamicCost() {
