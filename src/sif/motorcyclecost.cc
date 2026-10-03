@@ -225,6 +225,28 @@ void ParseCityOptions(const rapidjson::Value& json, Costing::Options* co) {
   }
 }
 
+// Loop guidance (patch 0029), parsed for motorcycle + motorcycle_curvy:
+// `/corridor` = encoded polyline (precision 1e-6) of the guide shape,
+// `/corridor_width` = half width (m) of the free band, `/corridor_slope` =
+// factor increase per half width beyond the band, `/corridor_max` = cap
+// (floored at 1.0). Absent => no corridor, byte-identical routing. Keys a
+// request leaves out keep what a pre-filled pbf already holds (the mobile
+// shim parses twice).
+void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
+  if (auto shape = rapidjson::get_optional<std::string>(json, "/corridor"); shape) {
+    co->set_corridor_shape(*shape);
+  }
+  if (auto w = rapidjson::get_optional<float>(json, "/corridor_width"); w) {
+    co->set_corridor_width(std::max(0.0f, *w));
+  }
+  if (auto s = rapidjson::get_optional<float>(json, "/corridor_slope"); s) {
+    co->set_corridor_slope(std::max(0.0f, *s));
+  }
+  if (auto m = rapidjson::get_optional<float>(json, "/corridor_max"); m) {
+    co->set_corridor_max(std::max(1.0f, *m));
+  }
+}
+
 } // namespace
 
 /**
@@ -649,6 +671,10 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
   // multiply in MotorcycleCurvyCost::EdgeCost (that would double-apply it).
   factor *= PreferredEdgeFactor(edgeid);
 
+  // Loop guidance (patch 0029): >= 1.0, so motorcycle_curvy inherits it
+  // through base.cost exactly once (same rule as the trail factor above).
+  factor *= LoopGuidanceFactor(edge, tile);
+
   return {sec * factor, sec};
 }
 
@@ -811,6 +837,7 @@ void ParseMotorcycleCostOptions(const rapidjson::Document& doc,
   JSON_PBF_RANGED_DEFAULT(co, kUseTrailsRange, json, "/use_trails", use_trails, warnings);
   JSON_PBF_RANGED_DEFAULT(co, kMotorcycleSpeedRange, json, "/top_speed", top_speed, warnings);
   ParsePreferredEdges(json, co);
+  ParseLoopGuidance(json, co);
   ParseCityOptions(json, co);
 }
 
@@ -991,6 +1018,7 @@ void ParseMotorcycleCurvyCostOptions(const rapidjson::Document& doc,
                           warnings);
   ParsePreferredEdges(json, co);
   ParseCityOptions(json, co);
+  ParseLoopGuidance(json, co);
 }
 
 cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
@@ -1003,6 +1031,8 @@ cost_ptr_t CreateMotorcycleCurvyCost(const Costing& costing_options) {
 /**********************************************************************************************/
 
 #ifdef INLINE_TEST
+
+#include "midgard/encoded.h"
 
 using namespace valhalla;
 using namespace sif;
@@ -1207,6 +1237,7 @@ public:
   using DynamicCost::PreferredEdgeFactor;
   using DynamicCost::preferred_edges_;
   using DynamicCost::preferred_factor_;
+  using DynamicCost::corridor_;
 };
 
 class TestMotorcycleCurvyPreferred : public MotorcycleCurvyCost {
@@ -1215,6 +1246,7 @@ public:
   using DynamicCost::PreferredEdgeFactor;
   using DynamicCost::preferred_edges_;
   using DynamicCost::preferred_factor_;
+  using DynamicCost::corridor_;
 };
 
 Costing parse_preferred_costing(const std::string& costing, const std::string& body) {
@@ -1268,6 +1300,43 @@ TEST(MotorcycleCost, PreferredEdgesAbsentIsNoOp) {
   EXPECT_TRUE(cost.preferred_edges_.empty());
   EXPECT_FLOAT_EQ(cost.preferred_factor_, 1.0f);
   EXPECT_FLOAT_EQ(cost.PreferredEdgeFactor(GraphId(static_cast<uint64_t>(12345))), 1.0f);
+}
+
+// ---- loop guidance corridor (patch 0029) ----
+
+std::string corridor_body(double width) {
+  const std::string shape = midgard::encode(
+      std::vector<midgard::PointLL>{{13.0, 47.8}, {13.1, 47.8}, {13.2, 47.8}});
+  std::string escaped; // polyline characters are 63..126; only '\\' needs escaping
+  for (char c : shape) {
+    if (c == '\\')
+      escaped += '\\';
+    escaped += c;
+  }
+  // corridor_max 0.5 is floored at 1.0 by the parse.
+  return R"({"corridor":")" + escaped + R"(","corridor_width":)" + std::to_string(width) +
+         R"(,"corridor_slope":1.0,"corridor_max":0.5})";
+}
+
+TEST(MotorcycleCost, CorridorParsedIntoAGrid) {
+  TestMotorcyclePreferred cost(parse_preferred_costing("motorcycle", corridor_body(1000.0)));
+  ASSERT_TRUE(cost.corridor_);
+  EXPECT_FLOAT_EQ(cost.corridor_->factor({13.1, 47.8}), 1.0f);
+  // corridor_max 0.5 was floored to 1.0: the corridor can never discount.
+  EXPECT_FLOAT_EQ(cost.corridor_->factor({13.1, 48.5}), 1.0f);
+}
+
+TEST(MotorcycleCurvyCost, CorridorInherited) {
+  TestMotorcycleCurvyPreferred cost(
+      parse_preferred_costing("motorcycle_curvy", corridor_body(1000.0)));
+  ASSERT_TRUE(cost.corridor_);
+}
+
+TEST(MotorcycleCost, CorridorAbsentOrZeroWidthIsOff) {
+  TestMotorcyclePreferred none(parse_preferred_costing("motorcycle", R"({})"));
+  EXPECT_FALSE(none.corridor_);
+  TestMotorcyclePreferred zero(parse_preferred_costing("motorcycle", corridor_body(0.0)));
+  EXPECT_FALSE(zero.corridor_);
 }
 
 TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {

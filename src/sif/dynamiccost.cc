@@ -2,6 +2,7 @@
 #include "baldr/graphconstants.h"
 #include "baldr/rapidjson_utils.h"
 #include "exceptions.h"
+#include "midgard/encoded.h"
 #include "proto_conversions.h"
 #include "sif/autocost.h"
 #include "sif/bicyclecost.h"
@@ -252,6 +253,18 @@ DynamicCost::DynamicCost(const Costing& costing,
       costing.options().has_preferred_factor() ? costing.options().preferred_factor() : 1.0f;
   for (const uint64_t id : costing.options().preferred_edges()) {
     preferred_edges_.insert(GraphId(id));
+  }
+
+  // Loop guidance corridor (patch 0029): one grid per request, so EdgeCost
+  // reads one cell per edge instead of scanning the polyline.
+  const auto& co = costing.options();
+  if (!co.corridor_shape().empty() && co.has_corridor_width() && co.corridor_width() > 0.0f) {
+    const auto line = midgard::decode<std::vector<midgard::PointLL>>(co.corridor_shape());
+    if (!line.empty()) {
+      corridor_ = std::make_shared<const CorridorGrid>(
+          line, co.corridor_width(), co.has_corridor_slope() ? co.corridor_slope() : 1.0f,
+          co.has_corridor_max() ? co.corridor_max() : 3.0f);
+    }
   }
 }
 

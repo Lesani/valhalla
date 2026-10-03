@@ -22,6 +22,7 @@
 #include <boost/container/small_vector.hpp>
 #include <proto/info.pb.h>
 
+#include <valhalla/sif/loop_guidance.h>
 #include <valhalla/sif/scenic_cost_helpers.h>
 
 #include <cstdint>
@@ -1284,6 +1285,34 @@ protected:
   }
 
   /**
+   * Where an edge sits for the loop-guidance layers (patch 0029): its end
+   * node, one array read when the node is in the edge's own tile; otherwise
+   * (an edge crossing a tile boundary, rare) the end of its shape.
+   */
+  midgard::PointLL GuidanceLL(const baldr::DirectedEdge* edge,
+                              const baldr::graph_tile_ptr& tile) const {
+    const auto endnode = edge->endnode();
+    if (endnode.tile_base() == tile->id().tile_base()) {
+      return tile->get_node_ll(endnode);
+    }
+    const auto info = tile->edgeinfo(edge);
+    const auto& shape = info.shape();
+    return edge->forward() ? shape.back() : shape.front();
+  }
+
+  /**
+   * >= 1.0 loop-guidance multiplier for one edge (patch 0029): the corridor
+   * around the request's guide polyline. 1.0 when no layer is active.
+   */
+  float LoopGuidanceFactor(const baldr::DirectedEdge* edge,
+                           const baldr::graph_tile_ptr& tile) const {
+    if (!corridor_ || !tile) {
+      return 1.0f;
+    }
+    return corridor_->factor(GuidanceLL(edge, tile));
+  }
+
+  /**
    * Calculate `track` costs based on tracks preference.
    * @param use_tracks value of tracks preference in range [0; 1]
    */
@@ -1336,6 +1365,10 @@ protected:
   // it (see MotorcycleCost::EdgeCost / PreferredEdgeFactor).
   std::unordered_set<baldr::GraphId> preferred_edges_;
   float preferred_factor_ = 1.0f;
+
+  // Loop guidance (patch 0029): the corridor grid, built once per request from
+  // Costing.Options.corridor_*; null when no corridor was sent.
+  std::shared_ptr<const CorridorGrid> corridor_;
 
   // Weighting to apply to ferry edges
   float ferry_factor_, rail_ferry_factor_;

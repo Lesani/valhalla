@@ -398,6 +398,19 @@ message Costing {
     oneof has_city_use_scenic_tolls {
       float city_use_scenic_tolls = 108; // [0.2, 0.7], motorcycle_curvy only
     }
+    // loop guidance (patch 0029, Vamoto #209): a corridor around a guide
+    // polyline. Edges within corridor_width (m) of it cost x1, beyond that the
+    // factor rises by corridor_slope per half-width up to corridor_max (>= 1).
+    string corridor_shape = 109; // encoded polyline, precision 1e-6
+    oneof has_corridor_width {
+      float corridor_width = 110;
+    }
+    oneof has_corridor_slope {
+      float corridor_slope = 111;
+    }
+    oneof has_corridor_max {
+      float corridor_max = 112;
+    }
   }
 
   oneof has_options {
