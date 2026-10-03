@@ -1322,13 +1322,20 @@ protected:
     if (!tile) {
       return std::min(f, kLoopFactorCap);
     }
+    // Patch 0036: a residential, living or service way earns no nice-road
+    // discount and no favourable jitter draw, and pays kMinorRoadLoopFactor.
+    const bool minor = is_minor_road(edge->classification(), edge->use());
+    if (minor) {
+      f *= kMinorRoadLoopFactor;
+    }
     // Patch 0032: boring roads priced up, from the tile's curve byte (ramps
     // earn no curve, as in patch 0024) and density.
     // Patch 0035: a road rougher than the rider accepts is no nice road.
     if (nice_weight_ > 0.0f) {
       const uint8_t byte =
-          (edge->use() != baldr::Use::kRamp && !rougher_than(edge->surface(), max_roughness_) &&
-           edgeid.is_valid() && tile->header()->has_ext_directededge())
+          (edge->use() != baldr::Use::kRamp && !minor &&
+           !rougher_than(edge->surface(), max_roughness_) && edgeid.is_valid() &&
+           tile->header()->has_ext_directededge())
               ? tile->ext_directededge(edgeid)->sinuosity()
               : 0;
       f *= nice_road_multiplier(byte, edge->density() >= kCityDensity, nice_weight_);
@@ -1337,7 +1344,7 @@ protected:
     // info, so a road costs the same jitter either way).
     if (jitter_ > 0.0f && jitter_cell_ <= 0.0f) {
       const uint64_t key = (tile->id().tile_base().value << 25) ^ edge->edgeinfo_offset();
-      f *= jitter_multiplier(unit_hash(key, jitter_seed_), jitter_);
+      f *= jitter_multiplier(minor ? 1.0f : unit_hash(key, jitter_seed_), jitter_);
     }
     if (corridor_ || (jitter_ > 0.0f && jitter_cell_ > 0.0f)) {
       const auto ll = GuidanceLL(edge, tile);
@@ -1347,7 +1354,8 @@ protected:
       if (jitter_ > 0.0f && jitter_cell_ > 0.0f) {
         const double y = ll.lat() * 110574.0;
         const double x = ll.lng() * 111320.0 * std::cos(ll.lat() * 0.017453292519943295);
-        f *= jitter_multiplier(value_noise(x, y, jitter_cell_, jitter_seed_), jitter_);
+        f *= jitter_multiplier(minor ? 1.0f : value_noise(x, y, jitter_cell_, jitter_seed_),
+                               jitter_);
       }
     }
     return std::min(f, kLoopFactorCap);
@@ -1401,11 +1409,47 @@ public:
   static constexpr uint32_t kLoopSearchLabelCap = 300000;
   static constexpr uint32_t kMinLoopSearchLabelCap = 50000;
   uint32_t SearchLabelCap() const {
-    if (!(corridor_ || reuse_factor_ > 1.0f || gate_lookahead_ > 0 || jitter_ > 0.0f ||
-          nice_weight_ > 0.0f)) {
+    if (!LoopLayersActive()) {
       return 0;
     }
     return search_label_cap_ > 0 ? search_label_cap_ : kLoopSearchLabelCap;
+  }
+  /** True on a loop or arc request: any loop-guidance layer is set. */
+  bool LoopLayersActive() const {
+    return corridor_ || reuse_factor_ > 1.0f || gate_lookahead_ > 0 || jitter_ > 0.0f ||
+           nice_weight_ > 0.0f;
+  }
+  /**
+   * Patch 0036: the hop guard's cost for one transition (0 when it does not
+   * apply). On a loop or arc request, a transition between a main road and a
+   * road below it pays kMainRoadHopCost scaled by (1 + nice_weight), the
+   * factor the nice-road weight puts on a straight main road.
+   */
+  float MainRoadHopCost(const baldr::DirectedEdge* pred, const baldr::DirectedEdge* edge) const {
+    if (!LoopLayersActive() ||
+        !main_road_hop_transition(pred->classification(), pred->use(), edge->classification(),
+                                  edge->use())) {
+      return 0.0f;
+    }
+    return kMainRoadHopCost * LoopTransitionScale();
+  }
+  float MainRoadHopCost(baldr::RoadClass pred_cls,
+                        baldr::Use pred_use,
+                        const baldr::DirectedEdge* edge) const {
+    if (!LoopLayersActive() ||
+        !main_road_hop_transition(pred_cls, pred_use, edge->classification(), edge->use())) {
+      return 0.0f;
+    }
+    return kMainRoadHopCost * LoopTransitionScale();
+  }
+  /**
+   * Patch 0036: a fixed transition penalty on a loop or arc request is
+   * scaled by (1 + nice_weight), the factor the nice-road weight puts on a
+   * straight road, so it keeps its weight against the edges (patch 0028's
+   * lesson for the trail factor). 1 on a plain request.
+   */
+  float LoopTransitionScale() const {
+    return LoopLayersActive() ? 1.0f + nice_weight_ : 1.0f;
   }
   /** Gate lookahead tries per gate (patch 0033); 0 = off. */
   uint32_t gate_lookahead() const {

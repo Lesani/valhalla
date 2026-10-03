@@ -5,6 +5,7 @@
 #include "loki/search.h"
 #include "loki/worker.h"
 #include "midgard/pointll.h"
+#include "sif/scenic_cost_helpers.h"
 
 #include <algorithm>
 #include <cmath>
@@ -65,6 +66,14 @@ constexpr double kMaxGateRadius = 30000.0;
 constexpr double kGateReach = 4.0;
 constexpr double kGateSoftCost = 0.1;
 constexpr double kGatePi = 3.14159265358979323846;
+// Patch 0036: a crossing on a road below a main road (unclassified or lower,
+// a residential/living/service way, a ramp) within this distance along the
+// gate of a main-road crossing is only a fallback. A leg ends on whichever
+// crossing it reaches cheapest and the next leg continues from there, so a
+// side street crossing next to the main road made the route leave the main
+// road for the side street and come back to it a few hundred metres later
+// (B159 at Bischofshofen).
+constexpr double kGateSideStreetM = 400.0;
 
 bool class_filtered(const DirectedEdge* edge, const valhalla::SearchFilter& filter) {
   const auto rc = static_cast<uint32_t>(edge->classification());
@@ -90,6 +99,9 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
 
   std::unordered_set<uint64_t> seen;
   google::protobuf::RepeatedPtrField<valhalla::PathEdge> edges, dead_ends;
+  // Patch 0036: per entry of `edges`, its signed position along the gate (m)
+  // and whether it is a main road.
+  std::vector<std::pair<double, bool>> edge_pos;
 
   // One crossing of a shape (stored orientation) at fraction `along` of its
   // length; `with_shape` = the travel along the stored shape crosses the gate
@@ -97,7 +109,8 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
   const double radius = std::min<double>(loc.gate_radius(), kMaxGateRadius);
   auto add = [&](GraphId shape_edge_id, const DirectedEdge* shape_edge, const graph_tile_ptr& tile,
                  bool with_shape, double along, const PointLL& at, double heading_deg,
-                 double offset_m) {
+                 double pos_m) {
+    const double offset_m = std::abs(pos_m);
     // The directed edge that travels along the stored shape is the one with
     // forward() == true.
     GraphId id = shape_edge_id;
@@ -134,7 +147,12 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
     // A destination-only crossing (private access) is banned on the first
     // bidirectional pass: the reverse search dies at once and the forward one
     // floods the network before the relaxed pass (seen at 60 s).
-    (edge->not_thru() || edge->destonly() || !reachable ? dead_ends : edges).Add(std::move(pe));
+    if (edge->not_thru() || edge->destonly() || !reachable) {
+      dead_ends.Add(std::move(pe));
+    } else {
+      edges.Add(std::move(pe));
+      edge_pos.emplace_back(pos_m, sif::is_main_road(edge->classification(), edge->use()));
+    }
   };
 
   // Every crossing of the gate [-half, +half] that `seen` has not had yet.
@@ -193,7 +211,7 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
                 }
                 hd = std::fmod(hd + 360.0, 360.0);
                 add(bin_edge, de, tile, with_shape, (acc + t * seg) / total, at, hd,
-                    std::abs(u - 0.5) * 2.0 * half);
+                    (u - 0.5) * 2.0 * half);
                 break; // one crossing per edge is enough
               }
             }
@@ -210,6 +228,30 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
   // the lookahead (patch 0033) always has another crossing to try. Not
   // wider: on a small loop a far wider gate reaches roads that triple it.
   scan(std::min(kGateReach * radius, kMaxGateRadius));
+
+  // Patch 0036: a side-street crossing next to a main-road crossing is a
+  // fallback (filtered edge), not a candidate.
+  {
+    google::protobuf::RepeatedPtrField<valhalla::PathEdge> kept;
+    for (int i = 0; i < edges.size(); ++i) {
+      const auto& e = edges.Get(i);
+      bool beside_main = false;
+      if (!edge_pos[i].second) {
+        graph_tile_ptr t;
+        const DirectedEdge* de = reader.directededge(GraphId(e.graph_id()), t);
+        if (de && sif::is_below_main_road(de->classification(), de->use())) {
+          for (const auto& [pos, main] : edge_pos) {
+            if (main && std::abs(pos - edge_pos[i].first) <= kGateSideStreetM) {
+              beside_main = true;
+              break;
+            }
+          }
+        }
+      }
+      (beside_main ? dead_ends : kept).Add()->CopyFrom(e);
+    }
+    edges.Swap(&kept);
+  }
 
   if (edges.empty() && dead_ends.empty()) {
     return; // nothing crosses: keep the plain point correlation

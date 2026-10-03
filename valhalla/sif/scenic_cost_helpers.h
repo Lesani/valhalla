@@ -385,6 +385,67 @@ inline float roughness_multiplier(baldr::Surface surface, uint32_t max_roughness
   return std::min(kRoughnessCap, 1.0f + kRoughnessStep * e * e);
 }
 
+// Patch 0036 (Vamoto #209 phase 7): minor-road hops. A loop or arc route
+// left the B159 at Pfarrwerfen and the B164 at Muehlbach am Hochkoenig for a
+// few hundred metres of side street and rejoined the same road. The loop
+// layers (0032 nice-road weight up to 3x, jitter up to 1.7x) price a straight
+// main road up per metre, while the junction kinks of a short village street
+// read as curves; the turn costs that keep a plain route on the main road do
+// not grow with the layers (the 0028 lesson), so two turns became cheaper
+// than a few hundred metres of main road.
+//
+// Owner ruling 2026-10-03: a residential, living or service way never earns
+// the curve reward, the nice-road discount or a favourable jitter draw, and
+// costs a bit more on a loop or arc request; it must not come out cheaper
+// than the main road beside it, yet a route starting, ending or crossing a
+// town still uses it to reach good roads.
+inline bool is_minor_road(baldr::RoadClass cls, baldr::Use use) {
+  using baldr::Use;
+  return cls == baldr::RoadClass::kResidential || cls == baldr::RoadClass::kServiceOther ||
+         use == Use::kLivingStreet || use == Use::kServiceRoad || use == Use::kParkingAisle ||
+         use == Use::kDriveway || use == Use::kAlley || use == Use::kDriveThru;
+}
+
+// The extra factor a minor road pays on a loop or arc request: with no
+// curve, nice-road or jitter discount, residential (1.65) * 1.25 = 2.06
+// stays above a straight primary (1.76) at the same speed.
+inline constexpr float kMinorRoadLoopFactor = 1.25f;
+
+// The hop guard: on a loop or arc request, every transition between a main
+// road (motorway, trunk, primary, secondary; not a ramp) and a road below it
+// (unclassified or lower, a minor road, or a ramp) pays kMainRoadHopCost,
+// scaled like the edges by the request's nice-road weight (1 + w). A
+// leave-and-rejoin pays it twice; a route that really turns off onto a small
+// road pays it once (a few hundred metres of a boring road against
+// kilometres of a good one; the harness's minor-road hops fell from 970 to
+// 43 over 960 plans with loop fit and twisty share at phase-6 level, where
+// 40 left 112). Cost only,
+// no time; symmetric, so the forward and the reverse search agree; >= 0,
+// so admissible. Tertiary roads are not below: leaving a main road for a
+// curvy tertiary is the point of curvy routing.
+inline constexpr float kMainRoadHopCost = 80.0f;
+
+inline bool is_main_road(baldr::RoadClass cls, baldr::Use use) {
+  using baldr::RoadClass;
+  return (cls == RoadClass::kMotorway || cls == RoadClass::kTrunk ||
+          cls == RoadClass::kPrimary || cls == RoadClass::kSecondary) &&
+         use != baldr::Use::kRamp && use != baldr::Use::kTurnChannel && !is_minor_road(cls, use);
+}
+
+inline bool is_below_main_road(baldr::RoadClass cls, baldr::Use use) {
+  using baldr::RoadClass;
+  return use == baldr::Use::kRamp || is_minor_road(cls, use) ||
+         static_cast<uint32_t>(cls) >= static_cast<uint32_t>(RoadClass::kUnclassified);
+}
+
+inline bool main_road_hop_transition(baldr::RoadClass pred_cls,
+                                     baldr::Use pred_use,
+                                     baldr::RoadClass cls,
+                                     baldr::Use use) {
+  return (is_main_road(pred_cls, pred_use) && is_below_main_road(cls, use)) ||
+         (is_main_road(cls, use) && is_below_main_road(pred_cls, pred_use));
+}
+
 } // namespace sif
 } // namespace valhalla
 

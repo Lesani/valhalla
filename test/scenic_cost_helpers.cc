@@ -20,7 +20,10 @@ using valhalla::sif::highway_class_multiplier;
 using valhalla::sif::highway_ramp_transition;
 using valhalla::sif::in_city;
 using valhalla::sif::kCityMotorwayDensity;
+using valhalla::sif::is_minor_road;
 using valhalla::sif::is_scenic_toll;
+using valhalla::sif::kMinorRoadLoopFactor;
+using valhalla::sif::main_road_hop_transition;
 using valhalla::sif::kCityAversion;
 using valhalla::sif::kCityAversionCap;
 using valhalla::sif::kCurvyDetourCap;
@@ -782,6 +785,78 @@ TEST(RoughnessMultiplier, AStricterRiderPaysAtLeastAsMuch) {
       EXPECT_GE(roughness_multiplier(s, max - 1), roughness_multiplier(s, max));
     }
   }
+}
+
+
+// ---- minor-road hops (patch 0036) ----
+
+TEST(MinorRoad, ResidentialLivingAndServiceWaysAreMinor) {
+  EXPECT_TRUE(is_minor_road(RoadClass::kResidential, Use::kRoad));
+  EXPECT_TRUE(is_minor_road(RoadClass::kServiceOther, Use::kRoad));
+  EXPECT_TRUE(is_minor_road(RoadClass::kTertiary, Use::kLivingStreet));
+  EXPECT_TRUE(is_minor_road(RoadClass::kUnclassified, Use::kServiceRoad));
+  EXPECT_TRUE(is_minor_road(RoadClass::kServiceOther, Use::kParkingAisle));
+  EXPECT_FALSE(is_minor_road(RoadClass::kUnclassified, Use::kRoad));
+  EXPECT_FALSE(is_minor_road(RoadClass::kTertiary, Use::kRoad));
+  EXPECT_FALSE(is_minor_road(RoadClass::kPrimary, Use::kRoad));
+}
+
+TEST(MinorRoad, NeverCheaperThanAStraightPrimaryBesideIt) {
+  // Owner ruling 2026-10-03: with no curve reward, a minor way pays the
+  // straight penalty like the main road, so its class row times the loop
+  // factor must stay above the primary row.
+  const ClassMultipliers w;
+  EXPECT_GE(w.residential * kMinorRoadLoopFactor, w.primary);
+  EXPECT_GE(w.living_street * kMinorRoadLoopFactor, w.primary);
+  EXPECT_GE(w.service * kMinorRoadLoopFactor, w.primary);
+  EXPECT_GT(kMinorRoadLoopFactor, 1.0f);
+  EXPECT_LE(kMinorRoadLoopFactor, 1.5f); // modest: a town start still plans
+}
+
+TEST(MainRoadHop, LeavingAMainRoadForARoadBelowItIsAHopTransition) {
+  EXPECT_TRUE(main_road_hop_transition(RoadClass::kPrimary, Use::kRoad, RoadClass::kResidential,
+                                       Use::kRoad));
+  EXPECT_TRUE(main_road_hop_transition(RoadClass::kPrimary, Use::kRoad, RoadClass::kUnclassified,
+                                       Use::kRoad));
+  EXPECT_TRUE(main_road_hop_transition(RoadClass::kSecondary, Use::kRoad, RoadClass::kSecondary,
+                                       Use::kRamp));
+  EXPECT_TRUE(main_road_hop_transition(RoadClass::kTrunk, Use::kRoad, RoadClass::kTertiary,
+                                       Use::kLivingStreet));
+  EXPECT_TRUE(main_road_hop_transition(RoadClass::kMotorway, Use::kRoad, RoadClass::kServiceOther,
+                                       Use::kServiceRoad));
+}
+
+TEST(MainRoadHop, IsSymmetric) {
+  const RoadClass classes[] = {RoadClass::kMotorway,     RoadClass::kTrunk,
+                               RoadClass::kPrimary,      RoadClass::kSecondary,
+                               RoadClass::kTertiary,     RoadClass::kUnclassified,
+                               RoadClass::kResidential,  RoadClass::kServiceOther};
+  const Use uses[] = {Use::kRoad, Use::kRamp, Use::kTurnChannel, Use::kLivingStreet,
+                      Use::kServiceRoad};
+  for (auto a : classes) {
+    for (auto ua : uses) {
+      for (auto b : classes) {
+        for (auto ub : uses) {
+          EXPECT_EQ(main_road_hop_transition(a, ua, b, ub), main_road_hop_transition(b, ub, a, ua));
+        }
+      }
+    }
+  }
+}
+
+TEST(MainRoadHop, TertiaryTurnChannelsAndMainToMainAreNoHop) {
+  // Leaving a main road for a curvy tertiary is what curvy routing is for.
+  EXPECT_FALSE(main_road_hop_transition(RoadClass::kPrimary, Use::kRoad, RoadClass::kTertiary,
+                                        Use::kRoad));
+  EXPECT_FALSE(main_road_hop_transition(RoadClass::kPrimary, Use::kRoad, RoadClass::kSecondary,
+                                        Use::kRoad));
+  EXPECT_FALSE(main_road_hop_transition(RoadClass::kPrimary, Use::kRoad, RoadClass::kPrimary,
+                                        Use::kTurnChannel));
+  // Two roads below a main road: no main road involved.
+  EXPECT_FALSE(main_road_hop_transition(RoadClass::kUnclassified, Use::kRoad,
+                                        RoadClass::kResidential, Use::kRoad));
+  EXPECT_FALSE(main_road_hop_transition(RoadClass::kTertiary, Use::kRoad, RoadClass::kResidential,
+                                        Use::kRoad));
 }
 
 } // namespace

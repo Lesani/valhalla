@@ -783,6 +783,10 @@ Cost MotorcycleCost::TransitionCost(
     }
     c.cost += seconds;
   }
+  // Patch 0036: the hop guard (loop and arc requests only).
+  if (!shortest_) {
+    c.cost += MainRoadHopCost(pred.classification(), pred.use(), edge);
+  }
   c.cost *= TrailTransitionFactor(edge, tile);
   return c;
 }
@@ -859,6 +863,10 @@ Cost MotorcycleCost::TransitionCostReverse(
       seconds *= kTransDensityFactor[node->density()];
     }
     c.cost += seconds;
+  }
+  // Patch 0036: the hop guard (loop and arc requests only).
+  if (!shortest_) {
+    c.cost += MainRoadHopCost(pred, edge);
   }
   c.cost *= PreferredEdgeFactor(pred_id);
   return c;
@@ -960,11 +968,14 @@ public:
     // Patch 0024 (#192): a ramp is not a curve worth riding -- its tight
     // radius earns no curve reward.
     const bool ramp = edge->use() == Use::kRamp;
+    // Patch 0036: nor a residential, living or service way (the junction
+    // kinks of a village street are no curves worth riding).
+    const bool minor = is_minor_road(edge->classification(), edge->use());
     const float surface_factor = city_set ? city_surface_factor_ : surface_factor_;
     // Patch 0035: nor on a road rougher than the rider accepts.
     const bool too_rough = rougher_than(edge->surface(), max_roughness_);
     const uint8_t curve_byte =
-        ((unpaved && surface_factor > 1.0f) || too_rough || ramp) ? 0 : sin_byte;
+        ((unpaved && surface_factor > 1.0f) || too_rough || ramp || minor) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
@@ -992,7 +1003,8 @@ public:
     // included -- waiving it made in-city interchanges a cheap detour.
     if (highway_ramp_transition(pred.classification(), pred.use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
-      c.cost += kCurvyHighwayRampPenalty * TrailTransitionFactor(edge, tile);
+      // Patch 0036: scaled like the edges on a loop or arc request.
+      c.cost += kCurvyHighwayRampPenalty * LoopTransitionScale() * TrailTransitionFactor(edge, tile);
     }
     return c;
   }
@@ -1011,7 +1023,7 @@ public:
                                                    internal_turn);
     if (highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
-      c.cost += kCurvyHighwayRampPenalty * PreferredEdgeFactor(pred_id);
+      c.cost += kCurvyHighwayRampPenalty * LoopTransitionScale() * PreferredEdgeFactor(pred_id);
     }
     return c;
   }
@@ -1630,13 +1642,18 @@ TEST(MotorcycleCurvyCost, NewTransitionPenaltiesAgreeForwardAndReverse) {
   const DirectedEdge ramp_city = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRamp, 10);
   const DirectedEdge road_city = transition_edge(baldr::RoadClass::kSecondary, baldr::Use::kRoad, 10);
   const DirectedEdge ferry_city = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kFerry, 10);
+  const DirectedEdge primary_rural = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRoad, 4);
+  const DirectedEdge residential_rural =
+      transition_edge(baldr::RoadClass::kResidential, baldr::Use::kRoad, 4);
   const std::pair<const DirectedEdge*, const DirectedEdge*> hops[] = {
       {&motorway_rural, &ramp_rural}, {&ramp_rural, &motorway_rural},
       {&motorway_city, &ramp_city},   {&ramp_city, &motorway_city},
       {&road_city, &ferry_city},      {&ferry_city, &road_city},
+      {&primary_rural, &residential_rural}, {&residential_rural, &primary_rural},
   };
   for (const auto* body :
        {R"({})", R"({"use_ferry":0.0,"city_use_ferry":0.5})",
+        R"({"nice_weight":2.0,"jitter":0.7,"jitter_seed":3})",
         R"({"city_fastest":true,"city_use_highways":1.0,"city_use_ferry":1.0})",
         R"({"shortest":true,"use_ferry":0.0,"city_use_ferry":1.0})"}) {
     for (const auto* costing : {"motorcycle", "motorcycle_curvy"}) {
@@ -1700,6 +1717,62 @@ TEST(MotorcycleCurvyCost, TrailFactorScalesTheRampHopLikeTheEdges) {
       EXPECT_FLOAT_EQ(reverse(*max, member).cost, base.cost) << costing;
       EXPECT_FLOAT_EQ(reverse(*max, other).secs, base.secs) << costing;
     }
+  }
+}
+
+TEST(MotorcycleCost, HopGuardPricesLeavingAMainRoadOnALoopRequestOnly) {
+  // Patch 0036: a transition between a main road and a road below it pays
+  // kMainRoadHopCost x (1 + nice_weight) on a loop or arc request, both
+  // searches alike, cost only; a plain request and a tertiary turn-off pay
+  // nothing extra.
+  const DirectedEdge primary = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRoad, 4);
+  const DirectedEdge residential =
+      transition_edge(baldr::RoadClass::kResidential, baldr::Use::kRoad, 4);
+  const DirectedEdge unclassified =
+      transition_edge(baldr::RoadClass::kUnclassified, baldr::Use::kRoad, 4);
+  const DirectedEdge tertiary = transition_edge(baldr::RoadClass::kTertiary, baldr::Use::kRoad, 4);
+  for (const auto* costing : {"motorcycle", "motorcycle_curvy"}) {
+    const auto make = [&](const char* body) {
+      const Costing c = parse_preferred_costing(costing, body);
+      return std::string(costing) == "motorcycle" ? CreateMotorcycleCost(c)
+                                                  : CreateMotorcycleCurvyCost(c);
+    };
+    const cost_ptr_t plain = make(R"({})");
+    const cost_ptr_t loop = make(R"({"nice_weight":2.0})");
+    const cost_ptr_t corridor_only = make(R"({"reuse_factor":4.0})");
+    for (const auto& [earlier, later] :
+         {std::pair{&primary, &residential}, std::pair{&residential, &primary},
+          std::pair{&primary, &unclassified}, std::pair{&unclassified, &primary}}) {
+      const TransitionPair p = transition_both_ways(*plain, *earlier, *later);
+      const TransitionPair l = transition_both_ways(*loop, *earlier, *later);
+      const TransitionPair r = transition_both_ways(*corridor_only, *earlier, *later);
+      EXPECT_FLOAT_EQ(l.forward.cost - p.forward.cost, 3.0f * kMainRoadHopCost) << costing;
+      EXPECT_FLOAT_EQ(l.reverse.cost - p.reverse.cost, 3.0f * kMainRoadHopCost) << costing;
+      EXPECT_FLOAT_EQ(r.forward.cost - p.forward.cost, kMainRoadHopCost) << costing;
+      EXPECT_FLOAT_EQ(l.forward.secs, p.forward.secs) << costing;
+    }
+    for (const auto& [earlier, later] :
+         {std::pair{&primary, &tertiary}, std::pair{&tertiary, &residential}}) {
+      EXPECT_FLOAT_EQ(transition_both_ways(*loop, *earlier, *later).forward.cost,
+                      transition_both_ways(*plain, *earlier, *later).forward.cost)
+          << costing;
+    }
+  }
+}
+
+TEST(MotorcycleCurvyCost, RampPenaltyScalesWithTheNiceWeightOnALoopRequest) {
+  // Patch 0036: the 0024 ramp hop keeps its weight against edges the
+  // nice-road weight priced up (x3 at weight 2), like the trail factor (0028).
+  const DirectedEdge motorway = transition_edge(baldr::RoadClass::kMotorway, baldr::Use::kRoad, 4);
+  const DirectedEdge ramp = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRamp, 4);
+  const char* body = R"({"nice_weight":2.0})";
+  const cost_ptr_t curvy = CreateMotorcycleCurvyCost(parse_preferred_costing("motorcycle_curvy", body));
+  const cost_ptr_t stock = CreateMotorcycleCost(parse_preferred_costing("motorcycle", body));
+  for (const auto& [earlier, later] : {std::pair{&motorway, &ramp}, std::pair{&ramp, &motorway}}) {
+    const TransitionPair c = transition_both_ways(*curvy, *earlier, *later);
+    const TransitionPair m = transition_both_ways(*stock, *earlier, *later);
+    EXPECT_FLOAT_EQ(c.forward.cost - m.forward.cost, 3.0f * kCurvyHighwayRampPenalty);
+    EXPECT_FLOAT_EQ(c.reverse.cost - m.reverse.cost, 3.0f * kCurvyHighwayRampPenalty);
   }
 }
 
