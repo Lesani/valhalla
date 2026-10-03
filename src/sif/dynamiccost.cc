@@ -269,6 +269,11 @@ DynamicCost::DynamicCost(const Costing& costing,
   // In-request reuse penalty (patch 0030); the set itself is filled by thor.
   reuse_factor_ = co.has_reuse_factor() ? std::max(1.0f, co.reuse_factor()) : 1.0f;
   reuse_clear_ = co.has_reuse_clear() ? std::max(0.0f, co.reuse_clear()) : 0.0f;
+  // Seeded jitter and nice-road weight (patch 0032).
+  jitter_ = co.has_jitter() ? std::max(0.0f, co.jitter()) : 0.0f;
+  jitter_seed_ = co.jitter_seed();
+  jitter_cell_ = co.has_jitter_cell() ? std::max(0.0f, co.jitter_cell()) : 0.0f;
+  nice_weight_ = co.has_nice_weight() ? std::max(0.0f, co.nice_weight()) : 0.0f;
 }
 
 DynamicCost::~DynamicCost() {

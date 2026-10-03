@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -272,4 +273,77 @@ TEST_F(LoopGuidanceTest, OpposingPricesBothDirections) {
   auto result = gurka::do_action(valhalla::Options::route, map, req);
   gurka::assert::raw::expect_path(result, {"FC", "EF", "DE", "AD"});
   EXPECT_FALSE(has_warning(result, 216));
+}
+
+// ---- seeded jitter (patch 0032) ----
+//
+// Two roads of equal length from A to C (over B and over D). Without jitter
+// the choice is a tie; with jitter the request seed decides it: one seed
+// always picks the same road, and over a handful of seeds both roads win.
+
+namespace {
+
+const std::string kTwinMap = R"(
+          B
+      A       C
+          D
+  )";
+
+const gurka::ways kTwinWays = {
+    {"AB", {{"highway", "secondary"}, {"name", "AB"}}},
+    {"BC", {{"highway", "secondary"}, {"name", "BC"}}},
+    {"AD", {{"highway", "secondary"}, {"name", "AD"}}},
+    {"DC", {{"highway", "secondary"}, {"name", "DC"}}},
+};
+
+class JitterTest : public ::testing::Test {
+protected:
+  static gurka::map map;
+
+  static void SetUpTestSuite() {
+    const auto layout = gurka::detail::map_to_coordinates(kTwinMap, 100);
+    map = gurka::buildtiles(layout, kTwinWays, {}, {}, VALHALLA_BUILD_DIR "test/data/loop_jitter");
+  }
+
+  static std::string loc(const std::string& n) {
+    const auto& p = map.nodes.at(n);
+    return R"({"lon": )" + std::to_string(p.lng()) + R"(, "lat": )" + std::to_string(p.lat()) + "}";
+  }
+
+  // The first road name of the A->C route for one seed.
+  static std::string first_road(uint32_t seed, const std::string& cell = "0") {
+    const auto req = R"({"locations": [)" + loc("A") + "," + loc("C") +
+                     R"(], "costing": "motorcycle", "costing_options": {"motorcycle": )" +
+                     R"({"jitter": 1.0, "jitter_cell": )" + cell + R"(, "jitter_seed": )" +
+                     std::to_string(seed) + "}}}";
+    auto result = gurka::do_action(valhalla::Options::route, map, req);
+    const auto& leg = result.trip().routes(0).legs(0);
+    return leg.node(0).edge().name(0).value();
+  }
+};
+gurka::map JitterTest::map = {};
+
+} // namespace
+
+TEST_F(JitterTest, SameSeedSameRoad) {
+  for (uint32_t seed : {1u, 2u, 3u}) {
+    EXPECT_EQ(first_road(seed), first_road(seed)) << "seed=" << seed;
+  }
+}
+
+TEST_F(JitterTest, SeedsPickBothRoads) {
+  std::set<std::string> seen;
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    seen.insert(first_road(seed));
+  }
+  EXPECT_EQ(seen.size(), 2u);
+}
+
+TEST_F(JitterTest, SpatialFieldSeedsPickBothRoads) {
+  // A 150 m lattice: B and D fall in different cells.
+  std::set<std::string> seen;
+  for (uint32_t seed = 1; seed <= 12; ++seed) {
+    seen.insert(first_road(seed, "150"));
+  }
+  EXPECT_EQ(seen.size(), 2u);
 }

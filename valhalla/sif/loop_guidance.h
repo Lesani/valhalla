@@ -8,6 +8,7 @@
 // preferred-trail bias (patch 0019).
 
 #include <valhalla/midgard/pointll.h>
+#include <valhalla/sif/scenic_cost_helpers.h>
 
 #include <algorithm>
 #include <cmath>
@@ -152,6 +153,61 @@ private:
   int32_t nx_ = 0, ny_ = 0;
   std::vector<float> factor_;
 };
+
+// ---- seeded jitter (patch 0032) ----
+
+// splitmix64 finaliser: a well-mixed 64-bit hash of `x`.
+inline uint64_t mix64(uint64_t x) {
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+// A uniform value in [0, 1) for (key, seed): the same pair always gives the
+// same value, any other seed an independent one.
+inline float unit_hash(uint64_t key, uint32_t seed) {
+  const uint64_t h = mix64(key ^ mix64(static_cast<uint64_t>(seed) + 0x5EEDull));
+  return static_cast<float>(h >> 40) / static_cast<float>(1ull << 24);
+}
+
+// A smooth seeded field in [0, 1) over the plane (metres): value noise on a
+// lattice of `cell_m`, smoothstep-interpolated, so neighbouring roads share
+// most of their jitter and a whole valley can be cheaper for one seed.
+inline float value_noise(double x_m, double y_m, float cell_m, uint32_t seed) {
+  const double gx = x_m / cell_m, gy = y_m / cell_m;
+  const double fx = std::floor(gx), fy = std::floor(gy);
+  const auto ix = static_cast<int64_t>(fx), iy = static_cast<int64_t>(fy);
+  const double tx = gx - fx, ty = gy - fy;
+  const double sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+  auto at = [seed](int64_t i, int64_t j) {
+    return static_cast<double>(
+        unit_hash((static_cast<uint64_t>(i) << 32) ^ static_cast<uint64_t>(j & 0xFFFFFFFF), seed));
+  };
+  const double a = at(ix, iy) + sx * (at(ix + 1, iy) - at(ix, iy));
+  const double b = at(ix, iy + 1) + sx * (at(ix + 1, iy + 1) - at(ix, iy + 1));
+  return static_cast<float>(std::min(a + sy * (b - a), 0.9999999));
+}
+
+// The jitter multiplier for a field/hash value u in [0, 1): 1 + amount * u,
+// never below 1 (keyed by the request seed only, never the profile).
+inline float jitter_multiplier(float u, float amount) {
+  return 1.0f + std::max(0.0f, amount) * std::clamp(u, 0.0f, 1.0f);
+}
+
+// ---- nice-road weight (patch 0032) ----
+
+// Relative pricing from data the tiles carry: the per-edge curve-density byte
+// (patch 0012) and the node density (urban). A curvy rural road is "nice" and
+// pays x1; a straight or urban one pays up to 1 + weight. Boring is priced UP
+// rather than nice DOWN, so the factor never drops below 1.
+inline float nice_road_multiplier(uint8_t curve_byte, bool urban, float weight) {
+  if (weight <= 0.0f) {
+    return 1.0f;
+  }
+  const float n = urban ? 0.0f : std::min(1.0f, curve_byte / kCurveDensityFullByte);
+  return 1.0f + weight * (1.0f - n);
+}
 
 } // namespace sif
 } // namespace valhalla

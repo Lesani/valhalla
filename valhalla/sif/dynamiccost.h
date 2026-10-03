@@ -1312,8 +1312,35 @@ protected:
     if (!reused_edges_.empty() && edgeid.is_valid() && reused_edges_.count(edgeid) != 0) {
       f *= reuse_factor_;
     }
-    if (corridor_ && tile) {
-      f *= corridor_->factor(GuidanceLL(edge, tile));
+    if (!tile) {
+      return f;
+    }
+    // Patch 0032: boring roads priced up, from the tile's curve byte (ramps
+    // earn no curve, as in patch 0024) and density.
+    if (nice_weight_ > 0.0f) {
+      const uint8_t byte =
+          (edge->use() != baldr::Use::kRamp && edgeid.is_valid() &&
+           tile->header()->has_ext_directededge())
+              ? tile->ext_directededge(edgeid)->sinuosity()
+              : 0;
+      f *= nice_road_multiplier(byte, edge->density() >= kCityDensity, nice_weight_);
+    }
+    // Patch 0032: seeded jitter per road (both directions share the edge
+    // info, so a road costs the same jitter either way).
+    if (jitter_ > 0.0f && jitter_cell_ <= 0.0f) {
+      const uint64_t key = (tile->id().tile_base().value << 25) ^ edge->edgeinfo_offset();
+      f *= jitter_multiplier(unit_hash(key, jitter_seed_), jitter_);
+    }
+    if (corridor_ || (jitter_ > 0.0f && jitter_cell_ > 0.0f)) {
+      const auto ll = GuidanceLL(edge, tile);
+      if (corridor_) {
+        f *= corridor_->factor(ll);
+      }
+      if (jitter_ > 0.0f && jitter_cell_ > 0.0f) {
+        const double y = ll.lat() * 110574.0;
+        const double x = ll.lng() * 111320.0 * std::cos(ll.lat() * 0.017453292519943295);
+        f *= jitter_multiplier(value_noise(x, y, jitter_cell_, jitter_seed_), jitter_);
+      }
     }
     return f;
   }
@@ -1400,6 +1427,11 @@ protected:
   std::unordered_set<baldr::GraphId> reused_edges_;
   float reuse_factor_ = 1.0f;
   float reuse_clear_ = 0.0f;
+  // Seeded jitter and nice-road weight (patch 0032); 0 = off.
+  float jitter_ = 0.0f;
+  uint32_t jitter_seed_ = 0;
+  float jitter_cell_ = 0.0f;
+  float nice_weight_ = 0.0f;
 
   // Weighting to apply to ferry edges
   float ferry_factor_, rail_ferry_factor_;

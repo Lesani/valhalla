@@ -421,6 +421,20 @@ message Costing {
     oneof has_reuse_clear {
       float reuse_clear = 114;
     }
+    // seeded jitter + nice-road weight (patch 0032): every edge pays
+    // 1 + jitter * u, u in [0, 1) from (road, jitter_seed) -- or, with
+    // jitter_cell > 0 (m), from a smooth seeded field -- and
+    // 1 + nice_weight * (1 - niceness) from its curve byte and density.
+    oneof has_jitter {
+      float jitter = 115;
+    }
+    uint32 jitter_seed = 116;
+    oneof has_jitter_cell {
+      float jitter_cell = 117;
+    }
+    oneof has_nice_weight {
+      float nice_weight = 118;
+    }
   }
 
   oneof has_options {

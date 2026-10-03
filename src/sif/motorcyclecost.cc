@@ -253,6 +253,20 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto c = rapidjson::get_optional<float>(json, "/reuse_clear"); c) {
     co->set_reuse_clear(std::max(0.0f, *c));
   }
+  // Patch 0032: /jitter (>= 0), /jitter_seed (the REQUEST seed, never the
+  // profile), /jitter_cell (m; 0 = per road), /nice_weight (>= 0).
+  if (auto j = rapidjson::get_optional<float>(json, "/jitter"); j) {
+    co->set_jitter(std::clamp(*j, 0.0f, 4.0f));
+  }
+  if (auto js = rapidjson::get_optional<uint32_t>(json, "/jitter_seed"); js) {
+    co->set_jitter_seed(*js);
+  }
+  if (auto jc = rapidjson::get_optional<float>(json, "/jitter_cell"); jc) {
+    co->set_jitter_cell(std::max(0.0f, *jc));
+  }
+  if (auto n = rapidjson::get_optional<float>(json, "/nice_weight"); n) {
+    co->set_nice_weight(std::clamp(*n, 0.0f, 8.0f));
+  }
 }
 
 } // namespace
@@ -1246,6 +1260,12 @@ public:
   using DynamicCost::preferred_edges_;
   using DynamicCost::preferred_factor_;
   using DynamicCost::corridor_;
+  using DynamicCost::jitter_;
+  using DynamicCost::jitter_cell_;
+  using DynamicCost::jitter_seed_;
+  using DynamicCost::nice_weight_;
+  using DynamicCost::reuse_clear_;
+  using DynamicCost::reuse_factor_;
 };
 
 class TestMotorcycleCurvyPreferred : public MotorcycleCurvyCost {
@@ -1345,6 +1365,20 @@ TEST(MotorcycleCost, CorridorAbsentOrZeroWidthIsOff) {
   EXPECT_FALSE(none.corridor_);
   TestMotorcyclePreferred zero(parse_preferred_costing("motorcycle", corridor_body(0.0)));
   EXPECT_FALSE(zero.corridor_);
+}
+
+TEST(MotorcycleCost, LoopKnobsParsedAndFloored) {
+  // Patches 0030/0032: reuse, jitter and nice-road knobs; the reuse factor is
+  // floored at 1.0 and negative weights at 0 (never a discount).
+  TestMotorcyclePreferred cost(parse_preferred_costing(
+      "motorcycle", R"({"reuse_factor":0.5,"reuse_clear":1500,"jitter":0.4,"jitter_seed":7,)"
+                    R"("jitter_cell":2500,"nice_weight":-1})"));
+  EXPECT_FLOAT_EQ(cost.reuse_factor_, 1.0f);
+  EXPECT_FLOAT_EQ(cost.reuse_clear_, 1500.0f);
+  EXPECT_FLOAT_EQ(cost.jitter_, 0.4f);
+  EXPECT_EQ(cost.jitter_seed_, 7u);
+  EXPECT_FLOAT_EQ(cost.jitter_cell_, 2500.0f);
+  EXPECT_FLOAT_EQ(cost.nice_weight_, 0.0f);
 }
 
 TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {
