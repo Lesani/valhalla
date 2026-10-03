@@ -277,6 +277,13 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto c = rapidjson::get_optional<uint32_t>(json, "/search_label_cap"); c) {
     co->set_search_label_cap(*c == 0 ? 0u : std::max(*c, DynamicCost::kMinLoopSearchLabelCap));
   }
+  // Patch 0035: /max_roughness, the worst surface byte the rider accepts
+  // (0-7, rounded; a float or an int on the wire). Not a loop layer: it
+  // never turns the loop search label cap on.
+  if (auto r = rapidjson::get_optional<float>(json, "/max_roughness"); r) {
+    co->set_max_roughness(
+        static_cast<uint32_t>(std::lround(std::clamp(*r, 0.0f, static_cast<float>(kMaxRoughness)))));
+  }
 }
 
 } // namespace
@@ -687,6 +694,11 @@ Cost MotorcycleCost::EdgeCost(const baldr::DirectedEdge* edge,
 
   factor *= EdgeFactor(edgeid);
 
+  // Patch 0035: the rider's road-roughness tolerance, >= 1.0. Here in the
+  // base EdgeCost so motorcycle_curvy (and its in-city fastest shortcut)
+  // inherits it through base.cost exactly once.
+  factor *= roughness_multiplier(edge->surface(), max_roughness_);
+
   // Patch 0025 setting 1, discourage city driving: graded, >= 1.0, motorway
   // and trunk exempt. Here in the base EdgeCost so motorcycle_curvy inherits
   // it through base.cost, the city-fastest shortcut included.
@@ -949,7 +961,10 @@ public:
     // radius earns no curve reward.
     const bool ramp = edge->use() == Use::kRamp;
     const float surface_factor = city_set ? city_surface_factor_ : surface_factor_;
-    const uint8_t curve_byte = ((unpaved && surface_factor > 1.0f) || ramp) ? 0 : sin_byte;
+    // Patch 0035: nor on a road rougher than the rider accepts.
+    const bool too_rough = rougher_than(edge->surface(), max_roughness_);
+    const uint8_t curve_byte =
+        ((unpaved && surface_factor > 1.0f) || too_rough || ramp) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
@@ -1274,6 +1289,7 @@ public:
   using DynamicCost::jitter_cell_;
   using DynamicCost::jitter_seed_;
   using DynamicCost::nice_weight_;
+  using DynamicCost::max_roughness_;
   using DynamicCost::reuse_clear_;
   using DynamicCost::reuse_factor_;
 };
@@ -1418,6 +1434,29 @@ TEST(MotorcycleCost, LoopRequestsMaySetTheirOwnLabelCap) {
   TestMotorcyclePreferred plain(
       parse_preferred_costing("motorcycle", R"({"search_label_cap":120000})"));
   EXPECT_EQ(plain.SearchLabelCap(), 0u);
+}
+
+TEST(MotorcycleCost, MaxRoughnessParsedClampedAndRounded) {
+  // Patch 0035: absent = off (7); out of range clamps, a float rounds.
+  TestMotorcyclePreferred absent(parse_preferred_costing("motorcycle", R"({})"));
+  EXPECT_EQ(absent.max_roughness_, kMaxRoughness);
+  TestMotorcyclePreferred strict(parse_preferred_costing("motorcycle", R"({"max_roughness":1})"));
+  EXPECT_EQ(strict.max_roughness_, 1u);
+  TestMotorcyclePreferred high(parse_preferred_costing("motorcycle", R"({"max_roughness":12})"));
+  EXPECT_EQ(high.max_roughness_, kMaxRoughness);
+  TestMotorcyclePreferred low(parse_preferred_costing("motorcycle", R"({"max_roughness":-3})"));
+  EXPECT_EQ(low.max_roughness_, 0u);
+  TestMotorcyclePreferred real(parse_preferred_costing("motorcycle", R"({"max_roughness":2.0})"));
+  EXPECT_EQ(real.max_roughness_, 2u);
+  TestMotorcyclePreferred curvy(
+      parse_preferred_costing("motorcycle_curvy", R"({"max_roughness":6})"));
+  EXPECT_EQ(curvy.max_roughness_, 6u);
+}
+
+TEST(MotorcycleCost, MaxRoughnessIsNoLoopLayer) {
+  // A plain route with a tolerance stays an unbounded search.
+  TestMotorcyclePreferred cost(parse_preferred_costing("motorcycle", R"({"max_roughness":1})"));
+  EXPECT_EQ(cost.SearchLabelCap(), 0u);
 }
 
 TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {

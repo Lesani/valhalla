@@ -1324,10 +1324,11 @@ protected:
     }
     // Patch 0032: boring roads priced up, from the tile's curve byte (ramps
     // earn no curve, as in patch 0024) and density.
+    // Patch 0035: a road rougher than the rider accepts is no nice road.
     if (nice_weight_ > 0.0f) {
       const uint8_t byte =
-          (edge->use() != baldr::Use::kRamp && edgeid.is_valid() &&
-           tile->header()->has_ext_directededge())
+          (edge->use() != baldr::Use::kRamp && !rougher_than(edge->surface(), max_roughness_) &&
+           edgeid.is_valid() && tile->header()->has_ext_directededge())
               ? tile->ext_directededge(edgeid)->sinuosity()
               : 0;
       f *= nice_road_multiplier(byte, edge->density() >= kCityDensity, nice_weight_);
@@ -1486,6 +1487,8 @@ protected:
   uint32_t gate_lookahead_ = 0;
   // Patch 0034: the request's loop search label cap; 0 = the default.
   uint32_t search_label_cap_ = 0;
+  // Patch 0035: the worst surface the rider is happy on; kMaxRoughness = off.
+  uint32_t max_roughness_ = kMaxRoughness;
   // The current leg's gate back-crossings (patch 0033); set by thor.
   std::unordered_set<baldr::GraphId> gate_back_edges_;
 

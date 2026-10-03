@@ -444,6 +444,13 @@ message Costing {
     // a loop request may create (0 = the engine default,
     // DynamicCost::kLoopSearchLabelCap). A phone sets what its memory carries.
     uint32 search_label_cap = 120;
+    // road-roughness tolerance (patch 0035): the worst baldr::Surface byte
+    // (0 paved_smooth .. 7 impassable) the rider is happy on. Rougher edges
+    // pay sif::roughness_multiplier, earn no curve reward and are no nice
+    // road. Absent = 7 = off.
+    oneof has_max_roughness {
+      uint32 max_roughness = 121;
+    }
   }
 
   oneof has_options {

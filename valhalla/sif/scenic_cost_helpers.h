@@ -360,6 +360,31 @@ inline float preferred_edge_multiplier(bool member, float factor) {
   return (member || factor <= 1.0f) ? 1.0f : factor;
 }
 
+// Patch 0035 (Vamoto #209 phase 6): the rider's road-roughness tolerance as
+// a cost. `max_roughness` is the worst baldr::Surface byte (0 paved_smooth ..
+// 7 impassable) the rider is happy on; an edge `e` steps rougher pays
+// 1 + kRoughnessStep * e^2, capped at kRoughnessCap. Within the tolerance the
+// factor is exactly 1 (an adventure profile at 6 never notices it); one step
+// above it doubles, two steps cost 5x. The cap keeps a forced rough first
+// or last edge (a start on a gravel lane) from flooding the search: the
+// avoid-unpaved trail factor already stacks on unpaved edges. >= 1, so
+// admissible. kMaxRoughness (7) is the off value and the default.
+inline constexpr uint32_t kMaxRoughness = 7;
+inline constexpr float kRoughnessStep = 1.0f;
+inline constexpr float kRoughnessCap = 6.0f;
+
+inline bool rougher_than(baldr::Surface surface, uint32_t max_roughness) {
+  return static_cast<uint32_t>(surface) > max_roughness;
+}
+
+inline float roughness_multiplier(baldr::Surface surface, uint32_t max_roughness) {
+  if (!rougher_than(surface, max_roughness)) {
+    return 1.0f;
+  }
+  const float e = static_cast<float>(static_cast<uint32_t>(surface) - max_roughness);
+  return std::min(kRoughnessCap, 1.0f + kRoughnessStep * e * e);
+}
+
 } // namespace sif
 } // namespace valhalla
 

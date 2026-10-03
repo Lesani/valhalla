@@ -24,10 +24,14 @@ using valhalla::sif::is_scenic_toll;
 using valhalla::sif::kCityAversion;
 using valhalla::sif::kCityAversionCap;
 using valhalla::sif::kCurvyDetourCap;
+using valhalla::sif::kMaxRoughness;
 using valhalla::sif::kPavedAversion;
+using valhalla::sif::kRoughnessCap;
 using valhalla::sif::kUnpavedRefSpeed;
 using valhalla::sif::paved_multiplier;
 using valhalla::sif::preferred_edge_multiplier;
+using valhalla::sif::rougher_than;
+using valhalla::sif::roughness_multiplier;
 using valhalla::sif::scaled_class_multipliers;
 using valhalla::sif::small_road_multiplier;
 using valhalla::sif::straightness_penalty;
@@ -727,6 +731,57 @@ TEST(CityFastestScale, IsAtLeastOneAndGrowsWithTheCurveAppetite) {
   EXPECT_GE(city_fastest_scale(0.0f, w), 1.0f);
   EXPECT_GT(city_fastest_scale(0.95f, w), city_fastest_scale(0.6f, w));
   EXPECT_GT(city_fastest_scale(0.6f, w), city_fastest_scale(0.3f, w));
+}
+
+// ---- road-roughness tolerance (patch 0035) ----
+
+const Surface kAllSurfaces[] = {Surface::kPavedSmooth, Surface::kPaved,  Surface::kPavedRough,
+                                Surface::kCompacted,   Surface::kDirt,   Surface::kGravel,
+                                Surface::kPath,        Surface::kImpassable};
+
+TEST(RoughnessMultiplier, WithinTheToleranceIsFree) {
+  for (uint32_t max = 0; max <= kMaxRoughness; ++max) {
+    for (Surface s : kAllSurfaces) {
+      if (static_cast<uint32_t>(s) <= max) {
+        EXPECT_FLOAT_EQ(roughness_multiplier(s, max), 1.0f) << max << " " << static_cast<int>(s);
+        EXPECT_FALSE(rougher_than(s, max));
+      }
+    }
+  }
+}
+
+TEST(RoughnessMultiplier, TheOffValueChangesNothing) {
+  for (Surface s : kAllSurfaces) {
+    EXPECT_FLOAT_EQ(roughness_multiplier(s, kMaxRoughness), 1.0f);
+  }
+}
+
+TEST(RoughnessMultiplier, RisesSteeplyAboveTheToleranceAndIsCapped) {
+  // A cruiser (1): cobbles double, compacted 5x, gravel and worse at the cap.
+  EXPECT_FLOAT_EQ(roughness_multiplier(Surface::kPavedRough, 1), 2.0f);
+  EXPECT_FLOAT_EQ(roughness_multiplier(Surface::kCompacted, 1), 5.0f);
+  EXPECT_FLOAT_EQ(roughness_multiplier(Surface::kGravel, 1), kRoughnessCap);
+  for (uint32_t max = 0; max < kMaxRoughness; ++max) {
+    float prev = 1.0f;
+    for (Surface s : kAllSurfaces) {
+      const float f = roughness_multiplier(s, max);
+      EXPECT_GE(f, prev) << max << " " << static_cast<int>(s);
+      EXPECT_GE(f, 1.0f);
+      EXPECT_LE(f, kRoughnessCap);
+      if (rougher_than(s, max)) {
+        EXPECT_GT(f, 1.0f);
+      }
+      prev = f;
+    }
+  }
+}
+
+TEST(RoughnessMultiplier, AStricterRiderPaysAtLeastAsMuch) {
+  for (Surface s : kAllSurfaces) {
+    for (uint32_t max = 1; max <= kMaxRoughness; ++max) {
+      EXPECT_GE(roughness_multiplier(s, max - 1), roughness_multiplier(s, max));
+    }
+  }
 }
 
 } // namespace
