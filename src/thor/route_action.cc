@@ -5,7 +5,10 @@
 #include "thor/triplegbuilder.h"
 #include "thor/worker.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <unordered_set>
 
 using namespace valhalla;
 using namespace valhalla::midgard;
@@ -346,24 +349,32 @@ uint32_t add_cost_factor_edges(const sif::mode_costing_t& costing,
  * edge's covering shortcut is NOT added: loop requests run without hierarchy
  * pruning, where shortcuts are not expanded.
  */
-void add_reused_edges(const std::vector<thor::PathInfo>& path,
-                      sif::DynamicCost& cost,
-                      baldr::GraphReader& reader,
-                      const midgard::PointLL& start) {
+std::vector<GraphId> add_reused_edges(const std::vector<thor::PathInfo>& path,
+                                      sif::DynamicCost& cost,
+                                      baldr::GraphReader& reader,
+                                      const midgard::PointLL& start) {
+  std::vector<GraphId> added; // the ids this call newly inserted (patch 0033 undoes them)
   if (cost.reuse_factor() <= 1.0f) {
-    return;
+    return added;
   }
   const float clear = cost.reuse_clear();
   graph_tile_ptr tile;
   auto add_both = [&](const GraphId& id) {
-    cost.AddReusedEdge(id);
+    if (cost.AddReusedEdge(id)) {
+      added.push_back(id);
+    }
     const auto opp = reader.GetOpposingEdgeId(id);
-    if (opp.is_valid()) {
-      cost.AddReusedEdge(opp);
+    if (opp.is_valid() && cost.AddReusedEdge(opp)) {
+      added.push_back(opp);
     }
   };
-  for (const auto& pi : path) {
-    const GraphId id = pi.edgeid;
+  for (size_t k = 0; k < path.size(); ++k) {
+    const GraphId id = path[k].edgeid;
+    // Patch 0033: not the arrival edge -- the next leg has to start on it,
+    // and a priced first edge only makes the far side of its search flood.
+    if (k + 1 == path.size()) {
+      break;
+    }
     if (!reader.GetGraphTile(id, tile)) {
       continue;
     }
@@ -382,6 +393,121 @@ void add_reused_edges(const std::vector<thor::PathInfo>& path,
       }
     }
   }
+  return added;
+}
+
+/**
+ * Gate lookahead (patch 0033): does `ahead` (the next leg, from the crossing
+ * `leg` arrived on) turn back within its first kLookaheadWindowM -- over the
+ * last kLookaheadWindowM of `leg`, or over its own way out (into a stub past
+ * the crossing and out again)? Either is the joint U-turn a dead end, or a
+ * gate on a road heading away from the next one, forces. Checked two ways:
+ * the opposing edge ids, and the end nodes' positions on a ~33 m grid,
+ * because on a dual carriageway the way back is the other carriageway, a
+ * different edge (B 20 at Bad Reichenhall). A node only counts once the route
+ * is kRetraceNearM past it (short town edges are not a way back), and only
+ * kRetraceBackM of riding back over such nodes is a retrace.
+ */
+constexpr float kLookaheadWindowM = 15000.0f;
+constexpr double kRetraceCellDeg = 0.0003; // ~33 m north-south
+constexpr float kRetraceNearM = 300.0f;
+constexpr float kRetraceBackM = 200.0f;
+
+uint64_t retrace_cell(const midgard::PointLL& ll, int di = 0, int dj = 0) {
+  const auto i = static_cast<int64_t>(std::floor(ll.lat() / kRetraceCellDeg)) + di;
+  const auto j = static_cast<int64_t>(std::floor(ll.lng() / kRetraceCellDeg)) + dj;
+  return (static_cast<uint64_t>(i) << 32) ^ static_cast<uint64_t>(j & 0xFFFFFFFF);
+}
+
+bool retraces(const std::vector<thor::PathInfo>& leg,
+              const std::vector<thor::PathInfo>& ahead,
+              baldr::GraphReader& reader) {
+  if (leg.empty() || ahead.empty()) {
+    return false;
+  }
+  graph_tile_ptr tile;
+  auto end_ll = [&](const GraphId& id, midgard::PointLL& out) {
+    if (!reader.GetGraphTile(id, tile)) {
+      return false;
+    }
+    graph_tile_ptr end_tile = tile;
+    const auto* node = reader.GetEndNode(tile->directededge(id), end_tile);
+    if (!node) {
+      return false;
+    }
+    out = node->latlng(end_tile->header()->base_ll());
+    return true;
+  };
+  std::unordered_set<GraphId> opposing; // riding one of these turns back
+  std::unordered_set<uint64_t> cells;   // where the route already went
+  auto mark_cells = [&](const GraphId& id) {
+    midgard::PointLL ll;
+    if (end_ll(id, ll)) {
+      for (int di = -1; di <= 1; ++di) {
+        for (int dj = -1; dj <= 1; ++dj) {
+          cells.insert(retrace_cell(ll, di, dj));
+        }
+      }
+    }
+  };
+  auto mark_opposing = [&](const GraphId& id) {
+    const auto opp = reader.GetOpposingEdgeId(id);
+    if (opp.is_valid()) {
+      opposing.insert(opp);
+    }
+  };
+  const float leg_end = leg.back().path_distance;
+  for (auto it = leg.rbegin(); it != leg.rend() && it->path_distance >= leg_end - kLookaheadWindowM;
+       ++it) {
+    mark_opposing(it->edgeid);
+    if (it->path_distance <= leg_end - kRetraceNearM) {
+      mark_cells(it->edgeid);
+    }
+  }
+  float back_m = 0.0f, prev_d = 0.0f;
+  size_t marked = 0; // ahead edges whose end nodes are in `cells`
+  for (size_t k = 0; k < ahead.size(); ++k) {
+    const auto& p = ahead[k];
+    if (p.path_distance > kLookaheadWindowM) {
+      break;
+    }
+    if (opposing.count(p.edgeid) != 0) {
+      return true;
+    }
+    while (marked < k && ahead[marked].path_distance <= p.path_distance - kRetraceNearM) {
+      mark_cells(ahead[marked++].edgeid);
+    }
+    midgard::PointLL ll;
+    if (k > 0 && end_ll(p.edgeid, ll) && cells.count(retrace_cell(ll)) != 0) {
+      back_m += p.path_distance - prev_d;
+      if (back_m >= kRetraceBackM) {
+        return true;
+      }
+    }
+    prev_d = p.path_distance;
+    mark_opposing(p.edgeid);
+  }
+  return false;
+}
+
+/**
+ * The opposing direction of every crossing of a gate location (patch 0033):
+ * what a leg to that gate must not ride (see SetGateBackEdges). Empty for any
+ * other location.
+ */
+std::unordered_set<GraphId> gate_back_edges(const valhalla::Location& loc,
+                                            baldr::GraphReader& reader) {
+  std::unordered_set<GraphId> out;
+  if (!loc.has_gate_heading_case()) {
+    return out;
+  }
+  for (const auto& e : loc.correlation().edges()) {
+    const auto opp = reader.GetOpposingEdgeId(GraphId(e.graph_id()));
+    if (opp.is_valid()) {
+      out.insert(opp);
+    }
+  }
+  return out;
 }
 
 } // namespace
@@ -839,6 +965,12 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
   bool add_hierarchy_limits_warning = false;
 
   graph_tile_ptr tile = nullptr;
+  // Patch 0030: the reuse penalty exempts edges near the first location.
+  const midgard::PointLL start_ll(options.locations(0).ll().lng(), options.locations(0).ll().lat());
+  auto correlated = options.locations();
+  // Patch 0033: set when a gate's every crossing turned back.
+  bool skip_gate = false;
+  uint32_t skipped_gates = 0;
   auto route_two_locations = [&, this](auto& origin, auto& destination) -> bool {
     // Get the algorithm type for this location pair
     thor::PathAlgorithm* path_algorithm =
@@ -872,10 +1004,84 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
       remove_path_edges(*origin,
                         [&last_edge](const auto& edge) { return edge.graph_id() != last_edge; });
     }
+    // Patch 0033: a leg to a gate must not cross it backwards.
+    auto& leg_cost = *mode_costing[static_cast<uint32_t>(mode)];
+    leg_cost.SetGateBackEdges(gate_back_edges(*destination, *reader));
+
     // Get best path and keep it
     auto temp_paths = this->get_path(path_algorithm, *origin, *destination, costing, api);
-    if (temp_paths.empty())
+    if (temp_paths.empty()) {
+      leg_cost.SetGateBackEdges({});
       return false;
+    }
+
+    // Patch 0033 (Vamoto #209): gate lookahead -- "step back one
+    // intersection and try the next-best road". A leg ending at a gate keeps
+    // its crossing only if the next leg, routed from it, does not ride back
+    // over the arrival (a dead-end valley behind the gate, too large for the
+    // tile's not_thru flag). Otherwise that crossing is dropped from the gate
+    // and the leg routed again; when every try retraces, the first leg stays.
+    if (leg_cost.gate_lookahead() > 0 && temp_paths.size() == 1 &&
+        destination->has_gate_heading_case() && is_through_point(*destination) &&
+        std::next(destination) != correlated.end()) {
+      const auto first_paths = temp_paths;
+      const auto first_destination = *destination;
+      bool clean = false;
+      for (uint32_t tries = 0; tries <= leg_cost.gate_lookahead(); ++tries) {
+        const auto& leg = temp_paths.front();
+        const GraphId arrival = leg.back().edgeid;
+        auto added = add_reused_edges(leg, leg_cost, *reader, start_ll);
+        valhalla::Location from = *destination;
+        remove_path_edges(from, [&arrival](const auto& e) { return e.graph_id() != arrival; });
+        valhalla::Location to = *std::next(destination);
+        auto* ahead_alg = this->get_path_algorithm(costing, from, to, api);
+        ahead_alg->Clear();
+        leg_cost.SetHierarchyLimits(ahead_alg == &bidir_astar ? hierarchy_limits_bidir
+                                                              : hierarchy_limits_unidir);
+        leg_cost.SetGateBackEdges(gate_back_edges(to, *reader));
+        auto ahead = this->get_path(ahead_alg, from, to, costing, api);
+        leg_cost.SetGateBackEdges(gate_back_edges(*destination, *reader));
+        for (const auto& id : added) {
+          leg_cost.RemoveReusedEdge(id);
+        }
+        if (ahead.empty() || !retraces(leg, ahead.front(), *reader)) {
+          clean = true;
+          break;
+        }
+        if (tries == leg_cost.gate_lookahead() || destination->correlation().edges_size() <= 1) {
+          break;
+        }
+        remove_path_edges(*destination,
+                          [&arrival](const auto& e) { return e.graph_id() == arrival; });
+        path_algorithm = this->get_path_algorithm(costing, *origin, *destination, api);
+        path_algorithm->Clear();
+        leg_cost.SetHierarchyLimits(path_algorithm == &bidir_astar ? hierarchy_limits_bidir
+                                                                   : hierarchy_limits_unidir);
+        auto again = this->get_path(path_algorithm, *origin, *destination, costing, api);
+        if (again.size() != 1) {
+          break;
+        }
+        temp_paths.swap(again);
+      }
+      leg_cost.SetHierarchyLimits(hierarchy_limits);
+      // The last gate standing is never skipped: without one a loop is S-S.
+      const auto gates_left = std::count_if(correlated.begin(), correlated.end(),
+                                            [](const auto& l) { return l.has_gate_heading_case(); });
+      if (!clean && gates_left > 1) {
+        // Every crossing turns back (a gate on a lone road heading away from
+        // the next one): skip the gate, the leg goes on to the next
+        // location. The caller drops it from the locations.
+        *destination = first_destination;
+        leg_cost.SetGateBackEdges({});
+        skip_gate = true;
+        return true;
+      }
+      if (!clean) {
+        temp_paths = first_paths;
+        *destination = first_destination;
+      }
+    }
+    leg_cost.SetGateBackEdges({});
 
     for (auto& temp_path : temp_paths) {
 
@@ -902,9 +1108,7 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
       last_edge = temp_path.back().edgeid;
 
       // Patch 0030: the later legs of this request pay for riding it again.
-      add_reused_edges(temp_path, *mode_costing[static_cast<uint32_t>(mode)], *reader,
-                       midgard::PointLL(options.locations(0).ll().lng(),
-                                        options.locations(0).ll().lat()));
+      add_reused_edges(temp_path, leg_cost, *reader, start_ll);
 
       // Merge through legs by updating the time and splicing the lists
       if (!path.empty()) {
@@ -963,14 +1167,22 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
     return true;
   };
 
-  auto correlated = options.locations();
   bool allow_retry = true;
 
   // For each pair of locations
   auto destination = ++correlated.begin();
   while (destination != correlated.end()) {
     auto origin = std::prev(destination);
-    if (!route_two_locations(origin, destination)) {
+    const bool routed = route_two_locations(origin, destination);
+    if (skip_gate) {
+      skip_gate = false;
+      ++skipped_gates;
+      const int at = static_cast<int>(destination - correlated.begin());
+      correlated.DeleteSubrange(at, 1);
+      destination = correlated.begin() + at;
+      continue;
+    }
+    if (!routed) {
       // if routing failed because an intermediate waypoint was snapped to the low reachability road
       // (such road lies in a small connectivity component that is not connected to other locations)
       // we should leave only high reachability candidates and try to route again
@@ -1008,6 +1220,8 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
   // maybe warn if we needed to change user provided hierarchy limits
   if (add_hierarchy_limits_warning)
     add_warning(api, allow_hierarchy_limits_modifications ? 210 : 209);
+  if (skipped_gates > 0)
+    add_warning(api, 217, std::to_string(skipped_gates));
 
   // assign changed locations
   *api.mutable_options()->mutable_locations() = std::move(correlated);

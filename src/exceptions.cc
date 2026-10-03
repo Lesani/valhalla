@@ -152,6 +152,7 @@ const std::unordered_map<int, std::string> warning_codes = {
   {214, R"(Distance exceeded max_timedep_distance for arrive_by, probably ignoring date_time)"},
   {215, R"(At least one location had no correlated edges, resorting to filtered edges)"},
   {216, R"(linear_cost_factors lines that could not be edge walked were skipped: )"},
+  {217, R"(gate locations whose every crossing turns back were skipped: )"},
   // 3xx is used when costing or location options were specified but we had to change them internally for some reason
   {300, R"(Many:Many CostMatrix was requested, but server only allows 1:Many TimeDistanceMatrix)"},
   {301, R"(1:Many TimeDistanceMatrix was requested, but server only allows Many:Many CostMatrix)"},

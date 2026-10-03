@@ -435,6 +435,11 @@ message Costing {
     oneof has_nice_weight {
       float nice_weight = 118;
     }
+    // gate lookahead (patch 0033): before a leg ending at a gate location is
+    // kept, the next leg is routed from its crossing; when that retraces the
+    // arrival (a dead-end valley behind the gate), the crossing is dropped and
+    // the leg re-routed, up to gate_lookahead times.
+    uint32 gate_lookahead = 119;
   }
 
   oneof has_options {

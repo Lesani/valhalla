@@ -1308,12 +1308,19 @@ protected:
                            const baldr::GraphId& edgeid,
                            const baldr::graph_tile_ptr& tile) const {
     float f = 1.0f;
+    // Patch 0033: the layers multiply; past kLoopFactorCap the far side of a
+    // bidirectional search expands everything cheaper than one such edge
+    // (a forced first edge at ~200x flooded a continent).
     // Patch 0030: an edge an earlier leg of this request already rode.
     if (!reused_edges_.empty() && edgeid.is_valid() && reused_edges_.count(edgeid) != 0) {
       f *= reuse_factor_;
     }
+    // Patch 0033: crossing the leg's own gate backwards.
+    if (!gate_back_edges_.empty() && edgeid.is_valid() && gate_back_edges_.count(edgeid) != 0) {
+      f *= kGateBackFactor;
+    }
     if (!tile) {
-      return f;
+      return std::min(f, kLoopFactorCap);
     }
     // Patch 0032: boring roads priced up, from the tile's curve byte (ramps
     // earn no curve, as in patch 0024) and density.
@@ -1342,7 +1349,7 @@ protected:
         f *= jitter_multiplier(value_noise(x, y, jitter_cell_, jitter_seed_), jitter_);
       }
     }
-    return f;
+    return std::min(f, kLoopFactorCap);
   }
 
 public:
@@ -1357,8 +1364,42 @@ public:
   float reuse_clear() const {
     return reuse_clear_;
   }
-  void AddReusedEdge(const baldr::GraphId& edgeid) {
-    reused_edges_.insert(edgeid);
+  bool AddReusedEdge(const baldr::GraphId& edgeid) {
+    return reused_edges_.insert(edgeid).second;
+  }
+  void RemoveReusedEdge(const baldr::GraphId& edgeid) {
+    reused_edges_.erase(edgeid);
+  }
+  /**
+   * Gate back-crossings (patch 0033): while thor routes a leg to a gate, the
+   * opposing direction of every crossing of that gate costs
+   * kGateBackFactor, so the leg does not cross the gate backwards, turn in a
+   * dead end beyond it and cross again the right way.
+   */
+  void SetGateBackEdges(std::unordered_set<baldr::GraphId> ids) {
+    gate_back_edges_ = std::move(ids);
+  }
+  static constexpr float kGateBackFactor = 8.0f;
+  /** Patch 0033: the combined loop-guidance factor never exceeds this. */
+  static constexpr float kLoopFactorCap = 16.0f;
+  /**
+   * Patch 0033: the most edge labels one path search may create on a loop
+   * request (any loop-guidance layer active); 0 = unlimited. Without
+   * hierarchy pruning one side of a bidirectional search whose other side
+   * stalls expands everything cheaper than the stalled frontier -- seen at
+   * 24M labels and std::bad_alloc on Europe tiles; a phone has far less.
+   * A capped search fails like an unroutable one.
+   */
+  static constexpr uint32_t kLoopSearchLabelCap = 2000000;
+  uint32_t SearchLabelCap() const {
+    return (corridor_ || reuse_factor_ > 1.0f || gate_lookahead_ > 0 || jitter_ > 0.0f ||
+            nice_weight_ > 0.0f)
+               ? kLoopSearchLabelCap
+               : 0;
+  }
+  /** Gate lookahead tries per gate (patch 0033); 0 = off. */
+  uint32_t gate_lookahead() const {
+    return gate_lookahead_;
   }
   void ClearReusedEdges() {
     reused_edges_.clear();
@@ -1432,6 +1473,10 @@ protected:
   uint32_t jitter_seed_ = 0;
   float jitter_cell_ = 0.0f;
   float nice_weight_ = 0.0f;
+  // Gate lookahead tries (patch 0033).
+  uint32_t gate_lookahead_ = 0;
+  // The current leg's gate back-crossings (patch 0033); set by thor.
+  std::unordered_set<baldr::GraphId> gate_back_edges_;
 
   // Weighting to apply to ferry edges
   float ferry_factor_, rail_ferry_factor_;

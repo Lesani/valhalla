@@ -145,6 +145,7 @@ void BidirectionalAStar::Init(const PointLL& origll, const PointLL& destll) {
   // the threshold is set.
   cost_threshold_ = std::numeric_limits<float>::max();
   iterations_threshold_ = std::numeric_limits<uint32_t>::max();
+  label_cap_ = costing_->SearchLabelCap();
   auto& hierarchy_limits = costing_->GetHierarchyLimits();
   ignore_hierarchy_limits_ =
       std::all_of(hierarchy_limits.begin() + 1,
@@ -600,6 +601,16 @@ BidirectionalAStar::GetBestPath(valhalla::Location& origin,
     // Terminate if the iterations threshold has been exceeded.
     if ((edgelabels_reverse_.size() + edgelabels_forward_.size()) > iterations_threshold_) {
       return FormPath(graphreader, options, origin, destination, forward_time_info);
+    }
+    // Vamoto patch 0033: a loop request's search is bounded (see
+    // DynamicCost::SearchLabelCap).
+    if (label_cap_ > 0 && (edgelabels_reverse_.size() + edgelabels_forward_.size()) > label_cap_) {
+      LOG_WARN("Search label cap reached: n = " + std::to_string(edgelabels_forward_.size()) + "," +
+               std::to_string(edgelabels_reverse_.size()));
+      if (!best_connections_.empty()) {
+        return FormPath(graphreader, options, origin, destination, forward_time_info);
+      }
+      return {};
     }
 
     // Get the next predecessor (based on which direction was expanded in prior step)

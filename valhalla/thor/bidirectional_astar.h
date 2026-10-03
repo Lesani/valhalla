@@ -120,6 +120,8 @@ protected:
   // Best candidate connection and threshold to extend search.
   float cost_threshold_;
   uint32_t iterations_threshold_;
+  // Vamoto patch 0033: label cap of a loop request's search (0 = none).
+  uint32_t label_cap_ = 0;
   uint32_t desired_paths_count_;
   std::vector<CandidateConnection> best_connections_;
 

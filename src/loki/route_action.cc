@@ -1,5 +1,7 @@
 #include "baldr/graphreader.h"
 #include "baldr/tilehierarchy.h"
+#include "loki/reach.h"
+#include "loki/reach.h"
 #include "loki/search.h"
 #include "loki/worker.h"
 #include "midgard/pointll.h"
@@ -47,12 +49,21 @@ void check_distance(const google::protobuf::RepeatedPtrField<valhalla::Location>
 // -- and, as a through location, the next leg continues on that same edge in
 // the same direction, so a joint is never a U-turn.
 //
+// A crossing within gate_radius is free; out to 4x it, each metre beyond
+// the radius costs a little (soft gate ends).
+//
 // Excluded: shortcuts, edges the costing does not allow, edges outside the
 // location's search_filter road classes, and edges entering a dead-end region
 // (`not_thru`, set by the tile builder): riding into a stub to cross a gate
-// and back out is exactly the joint U-turn this replaces. Those dead-end
-// crossings are kept as filtered edges, the engine's second-pass fallback.
+// and back out is exactly the joint U-turn this replaces. Dead-end,
+// destination-only and poorly reachable crossings are kept as filtered
+// edges, the engine's second-pass fallback.
 constexpr double kMaxGateRadius = 30000.0;
+// Crossings out to kGateReach x the radius are candidates; beyond the radius
+// each metre costs kGateSoftCost (thor adds a PathEdge's distance to the leg
+// cost), about 100 s per km -- worth a 1.5-2 km detour.
+constexpr double kGateReach = 4.0;
+constexpr double kGateSoftCost = 0.1;
 constexpr double kGatePi = 3.14159265358979323846;
 
 bool class_filtered(const DirectedEdge* edge, const valhalla::SearchFilter& filter) {
@@ -67,23 +78,26 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
   const double h = loc.gate_heading() * kGatePi / 180.0;
   const double tx = std::sin(h), ty = std::cos(h); // travel direction (east, north)
   const double rx = ty, ry = -tx;                   // to the right of travel
-  const double half = std::min<double>(loc.gate_radius(), kMaxGateRadius);
-  // The gate in local metres around ll: g1 + u * (g2 - g1), u in [0, 1].
-  const double g1x = -half * rx, g1y = -half * ry, gdx = 2 * half * rx, gdy = 2 * half * ry;
-  const PointLL p1(lng0 + g1x / mx, lat0 + g1y / my);
-  const PointLL p2(lng0 + (g1x + gdx) / mx, lat0 + (g1y + gdy) / my);
-
   const auto& level = TileHierarchy::levels().back();
-  const auto bins = level.tiles.Intersect(std::vector<PointLL>{p1, p2});
   const auto& filter = loc.search_filter();
+  // Patch 0033: a crossing must be reachable both ways like any snapped
+  // candidate (loki's minimum reachability), or a search ending on it floods
+  // the network from the other side before failing.
+  loki::Reach reach_finder;
+  const uint32_t min_in = loc.minimum_inbound_reachability();
+  const uint32_t min_out = loc.minimum_outbound_reachability();
+  const uint32_t max_reach = std::max(min_in, min_out);
+
   std::unordered_set<uint64_t> seen;
   google::protobuf::RepeatedPtrField<valhalla::PathEdge> edges, dead_ends;
 
   // One crossing of a shape (stored orientation) at fraction `along` of its
   // length; `with_shape` = the travel along the stored shape crosses the gate
   // in the gate's direction.
+  const double radius = std::min<double>(loc.gate_radius(), kMaxGateRadius);
   auto add = [&](GraphId shape_edge_id, const DirectedEdge* shape_edge, const graph_tile_ptr& tile,
-                 bool with_shape, double along, const PointLL& at, double heading_deg) {
+                 bool with_shape, double along, const PointLL& at, double heading_deg,
+                 double offset_m) {
     // The directed edge that travels along the stored shape is the one with
     // forward() == true.
     GraphId id = shape_edge_id;
@@ -108,55 +122,68 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
     pe.set_percent_along(std::clamp(pct, 0.0, 1.0));
     pe.mutable_ll()->set_lat(at.lat());
     pe.mutable_ll()->set_lng(at.lng());
-    pe.set_distance(0);
+    // Soft gate ends: free within the radius, then kGateSoftCost per metre.
+    pe.set_distance(static_cast<float>(std::max(0.0, offset_m - radius) * kGateSoftCost));
     pe.set_heading(static_cast<float>(heading_deg));
     pe.set_side_of_street(valhalla::Location::kNone);
-    // Every crossing counts as reachable: the reach retry must not drop them.
-    pe.set_inbound_reach(1 << 20);
-    pe.set_outbound_reach(1 << 20);
-    (edge->not_thru() ? dead_ends : edges).Add(std::move(pe));
+    const auto reach = max_reach > 0 ? reach_finder(edge, id, max_reach, reader, costing)
+                                      : loki::directed_reach{};
+    pe.set_inbound_reach(reach.inbound);
+    pe.set_outbound_reach(reach.outbound);
+    const bool reachable = reach.inbound >= min_in && reach.outbound >= min_out;
+    // A destination-only crossing (private access) is banned on the first
+    // bidirectional pass: the reverse search dies at once and the forward one
+    // floods the network before the relaxed pass (seen at 60 s).
+    (edge->not_thru() || edge->destonly() || !reachable ? dead_ends : edges).Add(std::move(pe));
   };
 
-  for (const auto& [tileid, bin_ids] : bins) {
-    auto bin_tile = reader.GetGraphTile(GraphId(tileid, level.level, 0));
-    if (!bin_tile) {
-      continue;
-    }
-    for (const auto bin : bin_ids) {
-      for (const auto& bin_edge : bin_tile->GetBin(bin)) {
-        // Bins list edges of other tiles too; a region pack may not hold
-        // them (see patch 0027): skip what is not loaded.
-        graph_tile_ptr tile = bin_tile;
-        if (!reader.GetGraphTile(bin_edge, tile)) {
-          continue;
-        }
-        const DirectedEdge* de = tile->directededge(bin_edge);
-        if (de->is_shortcut()) {
-          continue;
-        }
-        const auto info = tile->edgeinfo(de);
-        const auto& shape = info.shape();
-        double total = 0;
-        for (size_t i = 0; i + 1 < shape.size(); ++i) {
-          total += shape[i].Distance(shape[i + 1]);
-        }
-        if (total <= 0) {
-          continue;
-        }
-        double acc = 0;
-        for (size_t i = 0; i + 1 < shape.size(); ++i) {
-          const double ax = (shape[i].lng() - lng0) * mx, ay = (shape[i].lat() - lat0) * my;
-          const double bx = (shape[i + 1].lng() - lng0) * mx, by = (shape[i + 1].lat() - lat0) * my;
-          const double sdx = bx - ax, sdy = by - ay;
-          const double seg = shape[i].Distance(shape[i + 1]);
-          const double den = sdx * gdy - sdy * gdx;
-          if (std::abs(den) > 1e-9) {
-            // a + t * sd == g1 + u * gd
-            const double t = ((g1x - ax) * gdy - (g1y - ay) * gdx) / den;
-            const double u = ((g1x - ax) * sdy - (g1y - ay) * sdx) / den;
-            if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+  // Every crossing of the gate [-half, +half] that `seen` has not had yet.
+  auto scan = [&](double half) {
+    // The gate in local metres around ll: g1 + u * (g2 - g1), u in [0, 1].
+    const double g1x = -half * rx, g1y = -half * ry, gdx = 2 * half * rx, gdy = 2 * half * ry;
+    const PointLL p1(lng0 + g1x / mx, lat0 + g1y / my);
+    const PointLL p2(lng0 + (g1x + gdx) / mx, lat0 + (g1y + gdy) / my);
+    const auto bins = level.tiles.Intersect(std::vector<PointLL>{p1, p2});
+    for (const auto& [tileid, bin_ids] : bins) {
+      auto bin_tile = reader.GetGraphTile(GraphId(tileid, level.level, 0));
+      if (!bin_tile) {
+        continue;
+      }
+      for (const auto bin : bin_ids) {
+        for (const auto& bin_edge : bin_tile->GetBin(bin)) {
+          // Bins list edges of other tiles too; a region pack may not hold
+          // them (see patch 0027): skip what is not loaded.
+          graph_tile_ptr tile = bin_tile;
+          if (!reader.GetGraphTile(bin_edge, tile)) {
+            continue;
+          }
+          const DirectedEdge* de = tile->directededge(bin_edge);
+          if (de->is_shortcut()) {
+            continue;
+          }
+          const auto info = tile->edgeinfo(de);
+          const auto& shape = info.shape();
+          double total = 0;
+          for (size_t i = 0; i + 1 < shape.size(); ++i) {
+            total += shape[i].Distance(shape[i + 1]);
+          }
+          if (total <= 0) {
+            continue;
+          }
+          double acc = 0;
+          for (size_t i = 0; i + 1 < shape.size(); ++i) {
+            const double ax = (shape[i].lng() - lng0) * mx, ay = (shape[i].lat() - lat0) * my;
+            const double bx = (shape[i + 1].lng() - lng0) * mx,
+                         by = (shape[i + 1].lat() - lat0) * my;
+            const double sdx = bx - ax, sdy = by - ay;
+            const double seg = shape[i].Distance(shape[i + 1]);
+            const double den = sdx * gdy - sdy * gdx;
+            if (std::abs(den) > 1e-9) {
+              // a + t * sd == g1 + u * gd
+              const double t = ((g1x - ax) * gdy - (g1y - ay) * gdx) / den;
+              const double u = ((g1x - ax) * sdy - (g1y - ay) * sdx) / den;
               const double dot = sdx * tx + sdy * ty;
-              if (dot != 0) {
+              if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && dot != 0) {
                 const PointLL at(shape[i].lng() + t * (shape[i + 1].lng() - shape[i].lng()),
                                  shape[i].lat() + t * (shape[i + 1].lat() - shape[i].lat()));
                 const bool with_shape = dot > 0;
@@ -165,16 +192,24 @@ void correlate_gate(valhalla::Location& loc, GraphReader& reader, const sif::cos
                   hd += 180.0;
                 }
                 hd = std::fmod(hd + 360.0, 360.0);
-                add(bin_edge, de, tile, with_shape, (acc + t * seg) / total, at, hd);
+                add(bin_edge, de, tile, with_shape, (acc + t * seg) / total, at, hd,
+                    std::abs(u - 0.5) * 2.0 * half);
                 break; // one crossing per edge is enough
               }
             }
+            acc += seg;
           }
-          acc += seg;
         }
       }
     }
-  }
+  };
+
+  // Every crossing out to kGateReach x the radius, the ones beyond it at a
+  // soft cost: a gate across mountains still finds its road (a gate that
+  // silently became a point turned the next leg into an out-and-back), and
+  // the lookahead (patch 0033) always has another crossing to try. Not
+  // wider: on a small loop a far wider gate reaches roads that triple it.
+  scan(std::min(kGateReach * radius, kMaxGateRadius));
 
   if (edges.empty() && dead_ends.empty()) {
     return; // nothing crosses: keep the plain point correlation

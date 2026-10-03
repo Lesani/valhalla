@@ -267,6 +267,10 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto n = rapidjson::get_optional<float>(json, "/nice_weight"); n) {
     co->set_nice_weight(std::clamp(*n, 0.0f, 8.0f));
   }
+  // Patch 0033: /gate_lookahead tries per gate (0-8).
+  if (auto g = rapidjson::get_optional<uint32_t>(json, "/gate_lookahead"); g) {
+    co->set_gate_lookahead(std::min<uint32_t>(*g, 8));
+  }
 }
 
 } // namespace
@@ -1379,6 +1383,18 @@ TEST(MotorcycleCost, LoopKnobsParsedAndFloored) {
   EXPECT_EQ(cost.jitter_seed_, 7u);
   EXPECT_FLOAT_EQ(cost.jitter_cell_, 2500.0f);
   EXPECT_FLOAT_EQ(cost.nice_weight_, 0.0f);
+}
+
+TEST(MotorcycleCost, LoopRequestsBoundTheSearch) {
+  // Patch 0033: any loop layer bounds the labels of a search; a plain route
+  // is unbounded as before.
+  TestMotorcyclePreferred plain(parse_preferred_costing("motorcycle", R"({})"));
+  EXPECT_EQ(plain.SearchLabelCap(), 0u);
+  TestMotorcyclePreferred loop(parse_preferred_costing("motorcycle", R"({"reuse_factor":4})"));
+  EXPECT_EQ(loop.SearchLabelCap(), DynamicCost::kLoopSearchLabelCap);
+  TestMotorcyclePreferred lookahead(
+      parse_preferred_costing("motorcycle", R"({"gate_lookahead":2})"));
+  EXPECT_GT(lookahead.SearchLabelCap(), 0u);
 }
 
 TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {

@@ -529,6 +529,13 @@ std::vector<std::vector<PathInfo>> UnidirectionalAStar<expansion_direction, FORW
       (*interrupt)();
     }
 
+    // Vamoto patch 0033: a loop request's search is bounded (see
+    // DynamicCost::SearchLabelCap).
+    if (const auto cap = costing_->SearchLabelCap(); cap > 0 && edgelabels_.size() > cap) {
+      LOG_WARN("Search label cap reached: n = " + std::to_string(edgelabels_.size()));
+      return {};
+    }
+
     // Get next element from adjacency list. Check that it is valid. An
     // invalid label indicates there are no edges that can be expanded.
     const uint32_t predindex = adjacencylist_.pop();
