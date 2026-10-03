@@ -271,6 +271,12 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto g = rapidjson::get_optional<uint32_t>(json, "/gate_lookahead"); g) {
     co->set_gate_lookahead(std::min<uint32_t>(*g, 8));
   }
+  // Patch 0034: /search_label_cap, the most edge labels one loop search may
+  // create (0 = the default). Floored at kMinLoopSearchLabelCap: below it a
+  // plain 30 min loop leg already fails.
+  if (auto c = rapidjson::get_optional<uint32_t>(json, "/search_label_cap"); c) {
+    co->set_search_label_cap(*c == 0 ? 0u : std::max(*c, DynamicCost::kMinLoopSearchLabelCap));
+  }
 }
 
 } // namespace
@@ -1395,6 +1401,23 @@ TEST(MotorcycleCost, LoopRequestsBoundTheSearch) {
   TestMotorcyclePreferred lookahead(
       parse_preferred_costing("motorcycle", R"({"gate_lookahead":2})"));
   EXPECT_GT(lookahead.SearchLabelCap(), 0u);
+}
+
+TEST(MotorcycleCost, LoopRequestsMaySetTheirOwnLabelCap) {
+  // Patch 0034: a loop request's own cap, floored; 0 keeps the default; a
+  // plain route stays unbounded whatever it asks.
+  TestMotorcyclePreferred own(
+      parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":120000})"));
+  EXPECT_EQ(own.SearchLabelCap(), 120000u);
+  TestMotorcyclePreferred tiny(
+      parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":10})"));
+  EXPECT_EQ(tiny.SearchLabelCap(), DynamicCost::kMinLoopSearchLabelCap);
+  TestMotorcyclePreferred zero(
+      parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":0})"));
+  EXPECT_EQ(zero.SearchLabelCap(), DynamicCost::kLoopSearchLabelCap);
+  TestMotorcyclePreferred plain(
+      parse_preferred_costing("motorcycle", R"({"search_label_cap":120000})"));
+  EXPECT_EQ(plain.SearchLabelCap(), 0u);
 }
 
 TEST(MotorcycleCurvyCost, UseTollsIsParsedNotHardcoded) {

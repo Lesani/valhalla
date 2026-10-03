@@ -1389,13 +1389,22 @@ public:
    * stalls expands everything cheaper than the stalled frontier -- seen at
    * 24M labels and std::bad_alloc on Europe tiles; a phone has far less.
    * A capped search fails like an unroutable one.
+   *
+   * Patch 0034: a request may set its own cap (search_label_cap, floored at
+   * kMinLoopSearchLabelCap); 0 keeps this default. 300k (was 2M): a stalled
+   * search at 2M added ~480 MB to a 30 min loop plan (Oberwang, adventure,
+   * 256 MB tile cache); at 300k the same plan adds a few MB and the loop
+   * harness keeps its fit and redrive. At 150k a 300 km adventure loop no
+   * longer reaches its band.
    */
-  static constexpr uint32_t kLoopSearchLabelCap = 2000000;
+  static constexpr uint32_t kLoopSearchLabelCap = 300000;
+  static constexpr uint32_t kMinLoopSearchLabelCap = 50000;
   uint32_t SearchLabelCap() const {
-    return (corridor_ || reuse_factor_ > 1.0f || gate_lookahead_ > 0 || jitter_ > 0.0f ||
-            nice_weight_ > 0.0f)
-               ? kLoopSearchLabelCap
-               : 0;
+    if (!(corridor_ || reuse_factor_ > 1.0f || gate_lookahead_ > 0 || jitter_ > 0.0f ||
+          nice_weight_ > 0.0f)) {
+      return 0;
+    }
+    return search_label_cap_ > 0 ? search_label_cap_ : kLoopSearchLabelCap;
   }
   /** Gate lookahead tries per gate (patch 0033); 0 = off. */
   uint32_t gate_lookahead() const {
@@ -1475,6 +1484,8 @@ protected:
   float nice_weight_ = 0.0f;
   // Gate lookahead tries (patch 0033).
   uint32_t gate_lookahead_ = 0;
+  // Patch 0034: the request's loop search label cap; 0 = the default.
+  uint32_t search_label_cap_ = 0;
   // The current leg's gate back-crossings (patch 0033); set by thor.
   std::unordered_set<baldr::GraphId> gate_back_edges_;
 
