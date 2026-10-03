@@ -226,3 +226,50 @@ TEST_F(LoopGuidanceTest, ReuseClearExemptsTheStart) {
   auto result = gurka::do_action(valhalla::Options::route, map, req);
   gurka::assert::raw::expect_path(result, {"AB", "BC", "BC", "AB"});
 }
+
+// ---- linear_cost_factors robustness (patch 0031) ----
+
+namespace {
+
+std::string lcf_request(const std::string& from,
+                        const std::string& to,
+                        const std::string& shape,
+                        const std::string& extra) {
+  return R"({"locations": [)" + from + "," + to +
+         R"(], "costing": "motorcycle", "linear_cost_factors": [{"shape": ")" + shape +
+         R"(", "factor": 8)" + extra + "}]}";
+}
+
+bool has_warning(const valhalla::Api& api, unsigned code) {
+  for (const auto& w : api.info().warnings()) {
+    if (w.code() == code)
+      return true;
+  }
+  return false;
+}
+
+} // namespace
+
+TEST_F(LoopGuidanceTest, UnwalkableLineIsSkippedNotFatal) {
+  // A diagonal A->E follows no road: the edge walk fails. The route still
+  // comes back (the line is skipped, warning 216) instead of error 233.
+  const auto req = lcf_request(loc("A"), loc("C"), shape_of({"A", "E"}), "");
+  auto result = gurka::do_action(valhalla::Options::route, map, req);
+  gurka::assert::raw::expect_path(result, {"AB", "BC"});
+  EXPECT_TRUE(has_warning(result, 216));
+}
+
+TEST_F(LoopGuidanceTest, FactorPricesOnlyTheLinesDirection) {
+  // A->B->C priced x8 eastbound; riding C->A westbound is not affected.
+  const auto req = lcf_request(loc("C"), loc("A"), shape_of({"A", "B", "C"}), "");
+  auto result = gurka::do_action(valhalla::Options::route, map, req);
+  gurka::assert::raw::expect_path(result, {"BC", "AB"});
+}
+
+TEST_F(LoopGuidanceTest, OpposingPricesBothDirections) {
+  const auto req =
+      lcf_request(loc("C"), loc("A"), shape_of({"A", "B", "C"}), R"(, "opposing": true)");
+  auto result = gurka::do_action(valhalla::Options::route, map, req);
+  gurka::assert::raw::expect_path(result, {"FC", "EF", "DE", "AD"});
+  EXPECT_FALSE(has_warning(result, 216));
+}

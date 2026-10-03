@@ -211,8 +211,15 @@ void add_partial_shortcut(baldr::GraphReader& reader,
 /**
  * Given one or more cost factor shapes, resolve them into single edges with an ID, a cost factor and
  * a range by edge walking the graph to match each shape.
+ *
+ * Patch 0031 (Vamoto #209): a line the edge walk cannot follow (a one-way
+ * reversal, an end correlated to the wrong edge at a junction) is SKIPPED
+ * instead of failing the whole request with 233; the return value counts the
+ * skipped lines (warning 216). A line with `opposing` set also prices the
+ * opposing directed edges over the mirrored range, so a penalised road costs
+ * the same in both directions.
  */
-void add_cost_factor_edges(const sif::mode_costing_t& costing,
+uint32_t add_cost_factor_edges(const sif::mode_costing_t& costing,
                            const sif::TravelMode& mode,
                            baldr::GraphReader& reader,
                            valhalla::Options& options,
@@ -224,11 +231,14 @@ void add_cost_factor_edges(const sif::mode_costing_t& costing,
   // keep track of how many edges we're adding
   uint64_t edge_count = 0;
 
+  uint32_t skipped = 0;
   for (auto& line : *options.mutable_cost_factor_lines()) {
     std::vector<std::vector<PathInfo>> legs;
     if (!RouteMatcher::FormPath(costing, mode, reader, line, false, /* use_shortcuts=*/true, legs)) {
-      throw valhalla_exception_t{233};
+      ++skipped;
+      continue;
     }
+    const int first_added = costing_options->cost_factor_edges_size();
     for (const auto& leg : legs) {
       for (size_t i = 0; i < leg.size(); ++i) {
         if (edge_count > max_allowed_edges)
@@ -306,7 +316,25 @@ void add_cost_factor_edges(const sif::mode_costing_t& costing,
         }
       }
     }
+    if (line.opposing()) {
+      const int last_added = costing_options->cost_factor_edges_size();
+      for (int k = first_added; k < last_added; ++k) {
+        const auto e = costing_options->cost_factor_edges(k);
+        const auto opp = reader.GetOpposingEdgeId(static_cast<GraphId>(e.id()));
+        if (!opp.is_valid()) {
+          continue;
+        }
+        if (++edge_count > max_allowed_edges)
+          throw valhalla_exception_t{234};
+        auto* o = costing_options->add_cost_factor_edges();
+        o->set_id(opp);
+        o->set_factor(e.factor());
+        o->set_start(1.0 - e.end());
+        o->set_end(1.0 - e.start());
+      }
+    }
   }
+  return skipped;
 }
 
 /**
@@ -408,8 +436,12 @@ void thor_worker_t::route(Api& request) {
     // we parse costing twice in this case, once for edge walking,
     // and then again once with the edge factors added
     parse_costing(request);
-    add_cost_factor_edges(mode_costing, mode, *reader, *request.mutable_options(),
-                          min_linear_cost_factor, max_linear_cost_edges);
+    const auto skipped = add_cost_factor_edges(mode_costing, mode, *reader,
+                                               *request.mutable_options(), min_linear_cost_factor,
+                                               max_linear_cost_edges);
+    if (skipped > 0) {
+      add_warning(request, 216, std::to_string(skipped));
+    }
   }
   auto costing = parse_costing(request);
 

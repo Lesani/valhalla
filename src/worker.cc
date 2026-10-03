@@ -606,6 +606,11 @@ void parse_line_geojson(const rapidjson::Value& json_feat, valhalla::LinearFeatu
     shape_pt->mutable_ll()->set_lat(coords_j.GetArray()[1].GetFloat());
   }
   line_feat->set_cost_factor(json_obj["properties"].GetObject()["factor"].GetFloat());
+  // patch 0031: properties.opposing also prices the other direction
+  const auto& props = json_obj["properties"];
+  if (props.HasMember("opposing") && props["opposing"].IsBool()) {
+    line_feat->set_opposing(props["opposing"].GetBool());
+  }
 }
 
 void parse_line(const rapidjson::Value& json_feat, valhalla::LinearFeatureCost* line_feat) {
@@ -621,6 +626,10 @@ void parse_line(const rapidjson::Value& json_feat, valhalla::LinearFeatureCost* 
   }
 
   line_feat->set_cost_factor(json_obj["factor"].GetFloat());
+  // patch 0031: "opposing": true also prices the other direction
+  if (json_obj.HasMember("opposing") && json_obj["opposing"].IsBool()) {
+    line_feat->set_opposing(json_obj["opposing"].GetBool());
+  }
 }
 
 /**
