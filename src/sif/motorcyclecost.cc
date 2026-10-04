@@ -967,7 +967,7 @@ public:
     const bool unpaved = static_cast<uint8_t>(edge->surface()) >= 3;
     // Patch 0024 (#192): a ramp is not a curve worth riding -- its tight
     // radius earns no curve reward.
-    const bool ramp = edge->use() == Use::kRamp;
+    const bool link = is_link(edge->use());
     // Patch 0036: nor a residential, living or service way (the junction
     // kinks of a village street are no curves worth riding).
     const bool minor = is_minor_road(edge->classification(), edge->use());
@@ -975,7 +975,7 @@ public:
     // Patch 0035: nor on a road rougher than the rider accepts.
     const bool too_rough = rougher_than(edge->surface(), max_roughness_);
     const uint8_t curve_byte =
-        ((unpaved && surface_factor > 1.0f) || too_rough || ramp || minor) ? 0 : sin_byte;
+        ((unpaved && surface_factor > 1.0f) || too_rough || link || minor) ? 0 : sin_byte;
     // Issue #18 — admissible cost model: every factor below is >= 1.0, so
     // EdgeCost(motorcycle_curvy) >= EdgeCost(motorcycle) on every edge and
     // the A* heuristic calibrated against base costs stays admissible.
@@ -1005,6 +1005,12 @@ public:
                                 edge->classification(), edge->use() == Use::kRamp)) {
       // Patch 0036: scaled like the edges on a loop or arc request.
       c.cost += kCurvyHighwayRampPenalty * LoopTransitionScale() * TrailTransitionFactor(edge, tile);
+    } else if (main_road_link_transition(pred.classification(), pred.use(),
+                                         edge->classification(), edge->use())) {
+      // Patch 0037: applies to plain curvy requests too; a route may still
+      // use a required access link, but cannot earn a scenic shortcut hop.
+      c.cost += kCurvyMainRoadLinkPenalty * LoopTransitionScale() *
+                TrailTransitionFactor(edge, tile);
     }
     return c;
   }
@@ -1024,6 +1030,9 @@ public:
     if (highway_ramp_transition(pred->classification(), pred->use() == Use::kRamp,
                                 edge->classification(), edge->use() == Use::kRamp)) {
       c.cost += kCurvyHighwayRampPenalty * LoopTransitionScale() * PreferredEdgeFactor(pred_id);
+    } else if (main_road_link_transition(pred->classification(), pred->use(),
+                                         edge->classification(), edge->use())) {
+      c.cost += kCurvyMainRoadLinkPenalty * LoopTransitionScale() * PreferredEdgeFactor(pred_id);
     }
     return c;
   }
@@ -1799,6 +1808,37 @@ TEST(MotorcycleCurvyCost, CityFastestScaleIsTheStraightMainRoadCharge) {
   TestCurvyCity twisty(parse_preferred_costing("motorcycle_curvy",
                                                R"({"curvy_alpha":0.95,"city_fastest":true})"));
   EXPECT_GT(twisty.city_fastest_scale_, sport.city_fastest_scale_);
+}
+
+
+
+TEST(MotorcycleCurvyCost, MainRoadLinkPenaltyAppliesToPlainCurvyInBothDirections) {
+  const DirectedEdge primary = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRoad, 4);
+  const DirectedEdge turn_channel =
+      transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kTurnChannel, 4);
+  const auto curvy = CreateMotorcycleCurvyCost(parse_preferred_costing("motorcycle_curvy", R"({})"));
+  const auto stock = CreateMotorcycleCost(parse_preferred_costing("motorcycle", R"({})"));
+  for (const auto& [earlier, later] : {std::pair{&primary, &turn_channel},
+                                       std::pair{&turn_channel, &primary}}) {
+    const TransitionPair c = transition_both_ways(*curvy, *earlier, *later);
+    const TransitionPair m = transition_both_ways(*stock, *earlier, *later);
+    EXPECT_FLOAT_EQ(c.forward.cost - m.forward.cost, kCurvyMainRoadLinkPenalty);
+    EXPECT_FLOAT_EQ(c.reverse.cost - m.reverse.cost, kCurvyMainRoadLinkPenalty);
+    EXPECT_FLOAT_EQ(c.forward.secs, m.forward.secs);
+  }
+}
+
+TEST(MotorcycleCurvyCost, MainRoadLinkPenaltyScalesOnLoopAndTrailRequests) {
+  const DirectedEdge primary = transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kRoad, 4);
+  const DirectedEdge turn_channel =
+      transition_edge(baldr::RoadClass::kPrimary, baldr::Use::kTurnChannel, 4);
+  const auto plain = CreateMotorcycleCurvyCost(parse_preferred_costing("motorcycle_curvy", R"({})"));
+  const auto loop = CreateMotorcycleCurvyCost(
+      parse_preferred_costing("motorcycle_curvy", R"({"nice_weight":2.0})"));
+  const TransitionPair p = transition_both_ways(*plain, primary, turn_channel);
+  const TransitionPair l = transition_both_ways(*loop, primary, turn_channel);
+  EXPECT_FLOAT_EQ(l.forward.cost - p.forward.cost, 2.0f * kCurvyMainRoadLinkPenalty);
+  EXPECT_FLOAT_EQ(l.reverse.cost - p.reverse.cost, 2.0f * kCurvyMainRoadLinkPenalty);
 }
 
 } // namespace

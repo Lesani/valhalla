@@ -277,6 +277,15 @@ inline bool highway_ramp_transition(baldr::RoadClass pred_cls,
          (pred_ramp && !ramp && is_highway_class(cls));
 }
 
+// Patch 0037 (#230): ramps and turn channels are links, not scenic roads.
+// The existing motorway/trunk <-> ramp penalty stays at 60; every other
+// main-road <-> link transition is a smaller, symmetric curvy-only cost.
+inline constexpr float kCurvyMainRoadLinkPenalty = 30.0f;
+
+inline bool is_link(baldr::Use use) {
+  return use == baldr::Use::kRamp || use == baldr::Use::kTurnChannel;
+}
+
 // Patch 0025 (#193): city settings. "In a city" is decided per edge from
 // the stock mjolnir density (0..15, road km per km^2 within 2 km, the
 // average of the edge's two end nodes) -- the same threshold as Valhalla's
@@ -444,6 +453,19 @@ inline bool main_road_hop_transition(baldr::RoadClass pred_cls,
                                      baldr::Use use) {
   return (is_main_road(pred_cls, pred_use) && is_below_main_road(cls, use)) ||
          (is_main_road(cls, use) && is_below_main_road(pred_cls, pred_use));
+}
+
+
+inline bool main_road_link_transition(baldr::RoadClass pred_cls,
+                                      baldr::Use pred_use,
+                                      baldr::RoadClass cls,
+                                      baldr::Use use) {
+  const bool forward = is_main_road(pred_cls, pred_use) && is_link(use);
+  const bool reverse = is_main_road(cls, use) && is_link(pred_use);
+  if (!forward && !reverse) return false;
+  // Preserve patch 0024's stronger motorway/trunk <-> ramp charge.
+  return !highway_ramp_transition(pred_cls, pred_use == baldr::Use::kRamp, cls,
+                                  use == baldr::Use::kRamp);
 }
 
 } // namespace sif

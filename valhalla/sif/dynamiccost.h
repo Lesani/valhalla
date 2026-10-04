@@ -1325,6 +1325,7 @@ protected:
     // Patch 0036: a residential, living or service way earns no nice-road
     // discount and no favourable jitter draw, and pays kMinorRoadLoopFactor.
     const bool minor = is_minor_road(edge->classification(), edge->use());
+    const bool link = is_link(edge->use());
     if (minor) {
       f *= kMinorRoadLoopFactor;
     }
@@ -1333,7 +1334,7 @@ protected:
     // Patch 0035: a road rougher than the rider accepts is no nice road.
     if (nice_weight_ > 0.0f) {
       const uint8_t byte =
-          (edge->use() != baldr::Use::kRamp && !minor &&
+          (!link && !minor &&
            !rougher_than(edge->surface(), max_roughness_) && edgeid.is_valid() &&
            tile->header()->has_ext_directededge())
               ? tile->ext_directededge(edgeid)->sinuosity()
@@ -1344,7 +1345,7 @@ protected:
     // info, so a road costs the same jitter either way).
     if (jitter_ > 0.0f && jitter_cell_ <= 0.0f) {
       const uint64_t key = (tile->id().tile_base().value << 25) ^ edge->edgeinfo_offset();
-      f *= jitter_multiplier(minor ? 1.0f : unit_hash(key, jitter_seed_), jitter_);
+      f *= jitter_multiplier((minor || link) ? 1.0f : unit_hash(key, jitter_seed_), jitter_);
     }
     if (corridor_ || (jitter_ > 0.0f && jitter_cell_ > 0.0f)) {
       const auto ll = GuidanceLL(edge, tile);
@@ -1354,7 +1355,7 @@ protected:
       if (jitter_ > 0.0f && jitter_cell_ > 0.0f) {
         const double y = ll.lat() * 110574.0;
         const double x = ll.lng() * 111320.0 * std::cos(ll.lat() * 0.017453292519943295);
-        f *= jitter_multiplier(minor ? 1.0f : value_noise(x, y, jitter_cell_, jitter_seed_),
+        f *= jitter_multiplier((minor || link) ? 1.0f : value_noise(x, y, jitter_cell_, jitter_seed_),
                                jitter_);
       }
     }

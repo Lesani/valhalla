@@ -860,3 +860,29 @@ TEST(MainRoadHop, TertiaryTurnChannelsAndMainToMainAreNoHop) {
 }
 
 } // namespace
+
+TEST(Link, RampsAndTurnChannelsAreLinks) {
+  EXPECT_TRUE(is_link(Use::kRamp));
+  EXPECT_TRUE(is_link(Use::kTurnChannel));
+  EXPECT_FALSE(is_link(Use::kRoad));
+}
+
+TEST(Link, MainRoadToTurnChannelIsSymmetricButLinkToLinkIsNotPenalized) {
+  EXPECT_TRUE(main_road_link_transition(RoadClass::kPrimary, Use::kRoad,
+                                        RoadClass::kPrimary, Use::kTurnChannel));
+  EXPECT_TRUE(main_road_link_transition(RoadClass::kPrimary, Use::kTurnChannel,
+                                        RoadClass::kPrimary, Use::kRoad));
+  EXPECT_FALSE(main_road_link_transition(RoadClass::kPrimary, Use::kTurnChannel,
+                                         RoadClass::kPrimary, Use::kRamp));
+  EXPECT_FALSE(main_road_link_transition(RoadClass::kPrimary, Use::kTurnChannel,
+                                         RoadClass::kResidential, Use::kRoad));
+}
+
+TEST(Link, MotorwayRampRetainsTheExistingHigherPenalty) {
+  EXPECT_FALSE(main_road_link_transition(RoadClass::kMotorway, Use::kRoad,
+                                         RoadClass::kPrimary, Use::kRamp));
+  EXPECT_TRUE(highway_ramp_transition(RoadClass::kMotorway, false,
+                                      RoadClass::kPrimary, true));
+  EXPECT_FLOAT_EQ(kCurvyMainRoadLinkPenalty, 30.0f);
+  EXPECT_FLOAT_EQ(kCurvyHighwayRampPenalty, 60.0f);
+}
