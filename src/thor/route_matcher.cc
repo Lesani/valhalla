@@ -64,8 +64,8 @@ bool check_shape(const graph_tile_ptr& tile,
   if (edge_shape.size() < 2 || to <= from) {
     return false;
   }
-  // Both the graph and route polyline use six decimal places. This bounds
-  // projection/encoding error, not a map-snapping distance allowance.
+  // The supplied route polyline has six decimal places. Its codec unit
+  // bounds projection/encoding error, not a map-snapping distance allowance.
   constexpr double codec_epsilon = 1e-6;
   const auto vertex = [&](size_t i) {
     return edge_shape[de->forward() ? i : edge_shape.size() - 1 - i];

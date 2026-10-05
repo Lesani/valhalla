@@ -5,6 +5,7 @@
 #include <valhalla/sif/dynamiccost.h>
 #include <valhalla/thor/pathinfo.h>
 
+#include <utility>
 #include <vector>
 
 namespace valhalla {
