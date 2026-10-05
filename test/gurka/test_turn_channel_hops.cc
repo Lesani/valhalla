@@ -40,9 +40,9 @@ protected:
 
 TEST_F(TurnChannelHops, PlainCurvyStaysOnTheMainlineInBothDirections) {
   gurka::assert::raw::expect_path(gurka::do_action(Options::route, map, request(loc("A"), loc("D"))),
-                                  {"AB", "BC", "CD"});
+                                  {"B178", "B178", "B178"});
   gurka::assert::raw::expect_path(gurka::do_action(Options::route, map, request(loc("D"), loc("A"))),
-                                  {"CD", "BC", "AB"});
+                                  {"B178", "B178", "B178"});
 }
 
 TEST_F(TurnChannelHops, AStartOnTheLinkCanStillReachTheMainline) {

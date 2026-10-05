@@ -51,29 +51,62 @@ float length_comparison(const float length, const bool exact_match) {
   return length + tolerance;
 }
 
-// check if the intermediate shape points are also on the edge
+// Exact walks preserve every supplied vertex and every graph vertex between
+// their endpoints. A through location may split a graph segment; it may not
+// skip a graph vertex, leave the segment, or run backwards along it.
 bool check_shape(const graph_tile_ptr& tile,
                  const DirectedEdge* de,
                  const google::protobuf::RepeatedPtrField<valhalla::Location>& shape,
                  uint32_t from,
-                 uint32_t to) {
-  if (to - from == 1 && de->length() == 0) {
-    return true;
-  }
-  const auto edgeinfo = tile->edgeinfo(de);
-  const auto& edge_shape = edgeinfo.shape();
-  int32_t i = edge_shape.size() - (to - from);
-  if (i < 1 || (from > 0 && i != 1)) {
+                 uint32_t to,
+                 bool partial_end = false) {
+  const auto edge_shape = tile->edgeinfo(de).shape();
+  if (edge_shape.size() < 2 || to <= from) {
     return false;
   }
-  bool forward = de->forward();
-  for (uint32_t j = from + 1; j < to; i++, j++) {
-    const uint32_t shape_idx = forward ? i : edge_shape.size() - 1 - i;
-    if (!to_ll(shape.Get(j).ll()).ApproximatelyEqual(edge_shape[shape_idx])) {
+  // Both the graph and route polyline use six decimal places. This bounds
+  // projection/encoding error, not a map-snapping distance allowance.
+  constexpr double codec_epsilon = 1e-6;
+  const auto vertex = [&](size_t i) {
+    return edge_shape[de->forward() ? i : edge_shape.size() - 1 - i];
+  };
+  const auto first = to_ll(shape.Get(from).ll());
+  size_t segment = 0;
+  if (from > 0 && !first.ApproximatelyEqual(vertex(0), codec_epsilon)) {
+    return false;
+  }
+  while (segment + 1 < edge_shape.size() &&
+         !first.ApproximatelyEqual(first.Project(vertex(segment), vertex(segment + 1)),
+                                   codec_epsilon)) {
+    ++segment;
+  }
+  if (segment + 1 == edge_shape.size()) {
+    return false;
+  }
+  auto previous = first.Project(vertex(segment), vertex(segment + 1));
+  for (uint32_t j = from + 1; j <= to; ++j) {
+    const auto point = to_ll(shape.Get(j).ll());
+    if (segment + 1 == edge_shape.size()) {
+      if (!point.ApproximatelyEqual(vertex(segment), codec_epsilon)) {
+        return false;
+      }
+      continue;
+    }
+    const auto a = vertex(segment), b = vertex(segment + 1);
+    const auto projected = point.Project(a, b);
+    const double progression = (projected.lng() - previous.lng()) * (b.lng() - a.lng()) +
+                               (projected.lat() - previous.lat()) * (b.lat() - a.lat());
+    if (!point.ApproximatelyEqual(projected, codec_epsilon) || progression < 0) {
       return false;
     }
+    if (point.ApproximatelyEqual(b, codec_epsilon)) {
+      ++segment;
+      previous = vertex(segment);
+    } else {
+      previous = projected;
+    }
   }
-  return true;
+  return partial_end || segment + 1 == edge_shape.size();
 }
 
 // TODO: we need to stop relying on loki::Search to pre populate edge candidates for the first and
@@ -148,11 +181,20 @@ bool expand_from_node(const mode_costing_t& mode_costing,
       valhalla::midgard::equal<float>((distances[correlated_index].second + n->second.second),
                                       distances.back().second, kTotalDistanceEpsilon)) {
 
-    if (!path_infos.back().is_shortcut) {
+    bool covered = correlated_index + 1 == static_cast<size_t>(shape.size());
+    if (n->second.second > 0) {
+      const GraphId end_id(n->second.first.graph_id());
+      const auto end_tile = reader.GetGraphTile(end_id);
+      covered = end_tile &&
+                to_ll(shape.rbegin()->ll()).ApproximatelyEqual(to_ll(n->second.first.ll()), 1e-6) &&
+                check_shape(end_tile, end_tile->directededge(end_id), shape, correlated_index,
+                            shape.size() - 1, true);
+    }
+    // Distance agreement alone can stop several vertices before the input end.
+    // A successful exact walk must prove the entire last edge/tail as well.
+    if (covered && !path_infos.back().is_shortcut) {
       end_node = node;
       return true;
-    } else { // can't end on a shortcut
-      return false;
     }
   }
 
@@ -539,7 +581,11 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
     if (length <= de_length) {
       // Did not find the end of the origin edge. Check for trivial route on a single edge
       for (const auto& end : end_nodes) {
-        if (end.second.first.graph_id() == edge.graph_id()) {
+        if (end.second.first.graph_id() == edge.graph_id() &&
+            edge.percent_along() <= end.second.first.percent_along() &&
+            to_ll(options.shape().rbegin()->ll())
+                .ApproximatelyEqual(to_ll(end.second.first.ll()), 1e-6) &&
+            check_shape(begin_edge_tile, de, options.shape(), 0, options.shape_size() - 1, true)) {
           // Update the elapsed time based on edge cost
           uint8_t flow_sources;
           elapsed +=
