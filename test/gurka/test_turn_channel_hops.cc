@@ -152,3 +152,14 @@ TEST_F(TurnChannelHops, ExactWalkRejectsMissingGraphJunction) {
   points.erase(points.begin() + 1);
   EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, map, exact_trace_request(points)));
 }
+
+TEST_F(TurnChannelHops, ExactWalkViaRetainsPartialDestinationSpan) {
+  const auto end = map.nodes.at("C").PointAlongSegment(map.nodes.at("D"), 0.5);
+  const std::string finish = R"({"lon":)" + std::to_string(end.lng()) +
+                             R"(,"lat":)" + std::to_string(end.lat()) + "}";
+  const auto route = gurka::do_action(Options::route, map, request(loc("A"), finish));
+  auto points = midgard::decode<std::vector<midgard::PointLL>>(route.trip().routes(0).legs(0).shape());
+  ASSERT_GE(points.size(), 4);
+  points.insert(points.begin() + 1, points[0].PointAlongSegment(points[1], 0.5));
+  expect_exact_shape(points);
+}
