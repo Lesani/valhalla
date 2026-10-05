@@ -4,6 +4,7 @@
 #include "gurka.h"
 #include "test.h"
 #include "midgard/encoded.h"
+#include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
