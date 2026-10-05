@@ -173,7 +173,8 @@ bool expand_from_node(const mode_costing_t& mode_costing,
                       const bool from_transition,
                       GraphId& end_node,
                       followed_edges_t& followed_edges,
-                      const bool use_shortcuts) {
+                      const bool use_shortcuts,
+                      std::vector<std::pair<uint32_t, uint32_t>>* shape_spans) {
   // Done expanding when node equals stop node and the accumulated distance to that node
   // plus the partial last edge distance is approximately equal to the total distance
   auto n = end_nodes.find(node);
@@ -271,6 +272,7 @@ bool expand_from_node(const mode_costing_t& mode_costing,
                                 /*path_distance=*/-1, transition_cost,
                                 /*start_node_is_recovered=*/false, de->is_shortcut());
 
+        if (shape_spans) shape_spans->emplace_back(correlated_index, index);
         InternalTurn turn = nodeinfo
                                 ? costing->TurnType(prev_edge_label.opp_local_idx(), nodeinfo, de)
                                 : InternalTurn::kNoTurn;
@@ -290,13 +292,14 @@ bool expand_from_node(const mode_costing_t& mode_costing,
         // Continue walking shape to find the end edge...
         if (expand_from_node(mode_costing, mode, reader, shape, distances, time_info, use_timestamps,
                              index, end_node_tile, de->endnode(), end_nodes, prev_edge_label, elapsed,
-                             path_infos, false, end_node, followed_edges, use_shortcuts)) {
+                             path_infos, false, end_node, followed_edges, use_shortcuts, shape_spans)) {
           return true;
         } else {
           // Match failed along this edge, pop the last entry off path_infos as well as what it
           // contributed to the elapsed cost/time and try to keep going on the next edge
           elapsed -= cost;
           path_infos.pop_back();
+        if (shape_spans) shape_spans->pop_back();
           break;
         }
       }
@@ -319,7 +322,7 @@ bool expand_from_node(const mode_costing_t& mode_costing,
       if (expand_from_node(mode_costing, mode, reader, shape, distances, time_info, use_timestamps,
                            correlated_index, end_node_tile, trans->endnode(), end_nodes,
                            prev_edge_label, elapsed, path_infos, true, end_node, followed_edges,
-                           use_shortcuts)) {
+                           use_shortcuts, shape_spans)) {
         return true;
       }
     }
@@ -373,6 +376,19 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
                             const bool use_timestamps,
                             const bool use_shortcuts,
                             std::vector<std::vector<PathInfo>>& legs) {
+  return FormPath(mode_costing, mode, reader, options, use_timestamps, use_shortcuts, legs, nullptr);
+}
+
+template <typename Options>
+bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
+                            const sif::TravelMode& mode,
+                            baldr::GraphReader& reader,
+                            Options& options,
+                            const bool use_timestamps,
+                            const bool use_shortcuts,
+                            std::vector<std::vector<PathInfo>>& legs,
+                            std::vector<std::pair<uint32_t, uint32_t>>* shape_spans) {
+  if (shape_spans) shape_spans->clear();
   // TODO: build more than one leg based on location types
   legs.clear();
   legs.emplace_back();
@@ -479,6 +495,7 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
 
         // Add begin edge
         path_infos.emplace_back(mode, elapsed, graphid, 0, 0.f, -1);
+        if (shape_spans) shape_spans->emplace_back(0, index);
 
         InternalTurn turn =
             nodeinfo ? mode_costing[static_cast<int>(mode)]->TurnType(prev_edge_label.opp_local_idx(),
@@ -502,7 +519,7 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
         if (expand_from_node(mode_costing, mode, reader, options.shape(), distances, time_info,
                              use_timestamps, index, end_node_tile, de->endnode(), end_nodes,
                              prev_edge_label, elapsed, path_infos, false, end_node, followed_edges,
-                             use_shortcuts)) {
+                             use_shortcuts, shape_spans)) {
           // Find the edge we stopped on at the destination, if we didnt find it the greedy algorithm
           // hit a local maximum (made the wrong choice), TODO: we could rollback and try more
           auto n = end_nodes.find(end_node);
@@ -568,6 +585,7 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
 
           // Add end edge
           path_infos.emplace_back(mode, elapsed, end_edge_graphid, 0, 0.f, -1, transition_cost);
+        if (shape_spans) shape_spans->emplace_back(index, options.shape_size() - 1);
           return true;
         } else {
           // Did not find an edge that correlates with the trace, return false.
@@ -599,6 +617,7 @@ bool RouteMatcher::FormPath(const sif::mode_costing_t& mode_costing,
 
           // Add end edge
           path_infos.emplace_back(mode, elapsed, GraphId(edge.graph_id()), 0, 0.f, -1);
+        if (shape_spans) shape_spans->emplace_back(0, options.shape_size() - 1);
           options.mutable_shape(0)->mutable_correlation()->mutable_edges()->Add()->CopyFrom(edge);
           options.mutable_shape()->rbegin()->mutable_correlation()->mutable_edges()->Add()->CopyFrom(
               end.second.first);
@@ -627,6 +646,24 @@ template bool RouteMatcher::FormPath(const sif::mode_costing_t&,
                                      const bool,
                                      const bool,
                                      std::vector<std::vector<PathInfo>>&);
+
+template bool RouteMatcher::FormPath(const sif::mode_costing_t&,
+                                      const sif::TravelMode&,
+                                      baldr::GraphReader&,
+                                      valhalla::Options&,
+                                      const bool,
+                                      const bool,
+                                      std::vector<std::vector<PathInfo>>&,
+                                      std::vector<std::pair<uint32_t, uint32_t>>*);
+
+template bool RouteMatcher::FormPath(const sif::mode_costing_t&,
+                                      const sif::TravelMode&,
+                                      baldr::GraphReader&,
+                                      valhalla::LinearFeatureCost&,
+                                      const bool,
+                                      const bool,
+                                      std::vector<std::vector<PathInfo>>&,
+                                      std::vector<std::pair<uint32_t, uint32_t>>*);
 
 } // namespace thor
 } // namespace valhalla

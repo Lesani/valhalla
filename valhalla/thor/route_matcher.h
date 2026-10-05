@@ -36,6 +36,18 @@ public:
                        const bool use_timestamps,
                        const bool use_shortcuts,
                        std::vector<std::vector<PathInfo>>& legs);
+
+  // Input span per returned graph edge (currently one leg), recorded by the
+  // exact walk rather than inferred by matching the output geometry.
+  template <typename Options>
+  static bool FormPath(const sif::mode_costing_t& mode_costing,
+                       const sif::TravelMode& mode,
+                       baldr::GraphReader& reader,
+                       Options& options,
+                       const bool use_timestamps,
+                       const bool use_shortcuts,
+                       std::vector<std::vector<PathInfo>>& legs,
+                       std::vector<std::pair<uint32_t, uint32_t>>* shape_spans);
 };
 
 extern template bool RouteMatcher::FormPath(const sif::mode_costing_t&,

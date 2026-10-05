@@ -1,5 +1,6 @@
 #include "baldr/attributes_controller.h"
 #include "meili/match_result.h"
+#include "midgard/encoded.h"
 #include "thor/map_matcher.h"
 #include "thor/route_matcher.h"
 #include "thor/triplegbuilder.h"
@@ -139,10 +140,11 @@ void thor_worker_t::route_match(Api& request) {
   // TODO - make sure the trace has timestamps..
   auto& options = *request.mutable_options();
   std::vector<std::vector<PathInfo>> legs;
+  std::vector<std::pair<uint32_t, uint32_t>> shape_spans;
 
   // if the shape walking succeeds
   if (RouteMatcher::FormPath(mode_costing, mode, *reader, options, options.use_timestamps(), false,
-                             legs)) {
+                             legs, &shape_spans)) {
     // the origin is the first location for sure
     auto origin = options.mutable_shape()->begin();
     // build each leg of the route
@@ -159,6 +161,29 @@ void thor_worker_t::route_match(Api& request) {
       auto& leg = *request.mutable_trip()->mutable_routes()->Add()->mutable_legs()->Add();
       thor::TripLegBuilder::Build(options, controller, *reader, mode_costing, pleg.begin(),
                                   pleg.end(), *origin, *dest, leg, {"edge_walk"}, interrupt);
+      if (options.action() == Options::trace_attributes) {
+        std::vector<midgard::PointLL> input;
+        input.reserve(options.shape_size());
+        for (const auto& point : options.shape()) {
+          input.emplace_back(point.ll().lng(), point.ll().lat());
+        }
+        const auto encoded_input = midgard::encode(input);
+        if (leg.shape() != encoded_input) {
+          // Added vertices need corresponding per-segment attributes. Do not
+          // copy unsupported arrays onto different segments and claim proof.
+          if (leg.has_shape_attributes() || shape_spans.size() != pleg.size()) {
+            throw std::runtime_error("Exact input shape attributes require segment reindexing");
+          }
+          for (size_t i = 0; i < shape_spans.size(); ++i) {
+            auto* edge = leg.mutable_node(i)->mutable_edge();
+            edge->set_begin_shape_index(shape_spans[i].first);
+            edge->set_end_shape_index(shape_spans[i].second);
+          }
+          // FormPath proved every input and its graph edge span, including
+          // on-edge through vertices; preserve those actual points in output.
+          leg.set_shape(encoded_input);
+        }
+      }
       // Next leg
       origin = dest;
     }
