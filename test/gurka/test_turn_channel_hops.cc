@@ -3,6 +3,9 @@
 // routable. The exact route assertions run only in the integrated engine gate.
 #include "gurka.h"
 #include "test.h"
+#include "midgard/encoded.h"
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <gtest/gtest.h>
 
@@ -83,4 +86,68 @@ TEST_F(MotorwayLinkAccess, CurvyCanUseARequiredMotorwayRampAccess) {
                           R"(],"costing":"motorcycle_curvy"})";
   auto result = gurka::do_action(Options::route, motorway_access_map, req);
   ASSERT_FALSE(result.trip().routes(0).legs().empty());
+}
+
+namespace {
+std::vector<midgard::PointLL> mainline_shape() {
+  const auto route = gurka::do_action(Options::route, map, request(loc("A"), loc("D")));
+  return midgard::decode<std::vector<midgard::PointLL>>(route.trip().routes(0).legs(0).shape());
+}
+std::string exact_trace_request(const std::vector<midgard::PointLL>& points) {
+  rapidjson::Document doc;
+  doc.Parse(R"({"costing":"motorcycle_curvy","shape_match":"edge_walk","filters":{"action":"include","attributes":["shape","edge.begin_shape_index","edge.end_shape_index","edge.names","edge.use","edge.length","edge.road_class"]}})");
+  auto encoded = midgard::encode(points);
+  doc.AddMember("encoded_polyline", rapidjson::Value(encoded.c_str(), doc.GetAllocator()),
+                doc.GetAllocator());
+  rapidjson::StringBuffer buffer;
+  rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+  return buffer.GetString();
+}
+void expect_exact_shape(const std::vector<midgard::PointLL>& points) {
+  const auto result = gurka::do_action(Options::trace_attributes, map, exact_trace_request(points));
+  const auto& leg = result.trip().routes(0).legs(0);
+  const auto expected = midgard::decode<std::vector<midgard::PointLL>>(midgard::encode(points));
+  EXPECT_EQ(midgard::decode<std::vector<midgard::PointLL>>(leg.shape()), expected);
+  uint32_t previous = 0;
+  for (const auto& node : leg.node()) {
+    if (!node.has_edge()) continue;
+    EXPECT_EQ(node.edge().begin_shape_index(), previous);
+    EXPECT_LE(node.edge().begin_shape_index(), node.edge().end_shape_index());
+    previous = node.edge().end_shape_index();
+  }
+  EXPECT_EQ(previous, expected.size() - 1);
+}
+} // namespace
+
+TEST_F(TurnChannelHops, ExactWalkPreservesOriginalAndOnEdgeViaVertices) {
+  auto points = mainline_shape();
+  ASSERT_GE(points.size(), 3);
+  expect_exact_shape(points);
+  const auto midpoint = points[0].PointAlongSegment(points[1], 0.5);
+  points.insert(points.begin() + 1, midpoint);
+  expect_exact_shape(points);
+}
+
+TEST_F(TurnChannelHops, ExactWalkRejectsOffEdgeVertex) {
+  auto points = mainline_shape();
+  auto midpoint = points[0].PointAlongSegment(points[1], 0.5);
+  midpoint = midgard::PointLL(midpoint.lng(), midpoint.lat() + 0.0001);
+  points.insert(points.begin() + 1, midpoint);
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, map, exact_trace_request(points)));
+}
+
+TEST_F(TurnChannelHops, ExactWalkRejectsBacktrackingOnAnEdge) {
+  auto points = mainline_shape();
+  const auto a = points[0].PointAlongSegment(points[1], 0.75);
+  const auto b = points[0].PointAlongSegment(points[1], 0.25);
+  points.insert(points.begin() + 1, {a, b});
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, map, exact_trace_request(points)));
+}
+
+TEST_F(TurnChannelHops, ExactWalkRejectsMissingGraphJunction) {
+  auto points = mainline_shape();
+  ASSERT_GE(points.size(), 4);
+  points.erase(points.begin() + 1);
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, map, exact_trace_request(points)));
 }
