@@ -293,6 +293,9 @@ bool expand_from_node(const mode_costing_t& mode_costing,
         if (expand_from_node(mode_costing, mode, reader, shape, distances, time_info, use_timestamps,
                              index, end_node_tile, de->endnode(), end_nodes, prev_edge_label, elapsed,
                              path_infos, false, end_node, followed_edges, use_shortcuts, shape_spans)) {
+          // Propagate the actual final-node input index through recursion so
+          // the partial destination edge starts after the last proved edge.
+          correlated_index = index;
           return true;
         } else {
           // Match failed along this edge, pop the last entry off path_infos as well as what it
