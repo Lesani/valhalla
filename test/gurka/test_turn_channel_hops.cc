@@ -105,8 +105,9 @@ std::string exact_trace_request(const std::vector<midgard::PointLL>& points) {
   doc.Accept(writer);
   return buffer.GetString();
 }
-void expect_exact_shape(const std::vector<midgard::PointLL>& points) {
-  const auto result = gurka::do_action(Options::trace_attributes, map, exact_trace_request(points));
+void expect_exact_shape(const std::vector<midgard::PointLL>& points,
+                        const gurka::map& tiles = map) {
+  const auto result = gurka::do_action(Options::trace_attributes, tiles, exact_trace_request(points));
   const auto& leg = result.trip().routes(0).legs(0);
   const auto expected = midgard::decode<std::vector<midgard::PointLL>>(midgard::encode(points));
   EXPECT_EQ(midgard::decode<std::vector<midgard::PointLL>>(leg.shape()), expected);
@@ -162,4 +163,61 @@ TEST_F(TurnChannelHops, ExactWalkViaRetainsPartialDestinationSpan) {
   ASSERT_GE(points.size(), 4);
   points.insert(points.begin() + 1, points[0].PointAlongSegment(points[1], 0.5));
   expect_exact_shape(points);
+}
+
+
+namespace {
+gurka::map bent_edge_map;
+const midgard::PointLL bent_a(13, 47), bent_b(13.001, 47), bent_c(13.001, 47.001);
+class BentEdgeExactWalk : public ::testing::Test {
+protected:
+  static void SetUpTestSuite() {
+    bent_edge_map = gurka::buildtiles(
+        {{"A", bent_a}, {"B", bent_b}, {"C", bent_c}},
+        {{"ABC", {{"highway", "primary"}, {"name", "Bent road"}}}}, {}, {},
+        VALHALLA_BUILD_DIR "test/data/bent_edge_exact_walk");
+  }
+};
+} // namespace
+
+TEST_F(BentEdgeExactWalk, PartialOriginAtInteriorBendBothDirections) {
+  // B is geometry inside one edge, not a graph junction. Routing proves that
+  // these partial paths exist before asking exact matching to preserve them.
+  for (const auto& finish : {bent_c, bent_a}) {
+    const auto location = [](const auto& p) {
+      return R"({"lon":)" + std::to_string(p.lng()) +
+             R"(,"lat":)" + std::to_string(p.lat()) + "}";
+    };
+    const auto route = gurka::do_action(Options::route, bent_edge_map,
+                                      request(location(bent_b), location(finish)));
+    const auto& leg = route.trip().routes(0).legs(0);
+    ASSERT_EQ(leg.node_size(), 2); // exactly one graph edge
+    ASSERT_EQ(midgard::decode<std::vector<midgard::PointLL>>(leg.shape()),
+              (std::vector<midgard::PointLL>{bent_b, finish}));
+    expect_exact_shape({bent_b, finish}, bent_edge_map);
+  }
+}
+
+TEST_F(BentEdgeExactWalk, PartialOriginAndPartialDestination) {
+  expect_exact_shape({bent_b, bent_b.PointAlongSegment(bent_c, 0.5)}, bent_edge_map);
+}
+
+TEST_F(BentEdgeExactWalk, IncomingPartialOriginKeepsInteriorGraphVertex) {
+  expect_exact_shape({bent_a.PointAlongSegment(bent_b, 0.5), bent_b, bent_c}, bent_edge_map);
+}
+
+TEST_F(BentEdgeExactWalk, PartialOriginRejectsOffEdgePoint) {
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, bent_edge_map,
+      exact_trace_request({bent_b, midgard::PointLL(13.0011, 47.0005), bent_c})));
+}
+
+TEST_F(BentEdgeExactWalk, PartialOriginRejectsBacktracking) {
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, bent_edge_map,
+      exact_trace_request({bent_b, bent_b.PointAlongSegment(bent_c, 0.75),
+                          bent_b.PointAlongSegment(bent_c, 0.25), bent_c})));
+}
+
+TEST_F(BentEdgeExactWalk, IncomingPartialOriginCannotSkipBend) {
+  EXPECT_ANY_THROW(gurka::do_action(Options::trace_attributes, bent_edge_map,
+      exact_trace_request({bent_a.PointAlongSegment(bent_b, 0.5), bent_c})));
 }
