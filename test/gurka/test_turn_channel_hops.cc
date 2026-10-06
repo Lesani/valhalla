@@ -192,9 +192,15 @@ TEST_F(BentEdgeExactWalk, PartialOriginAtInteriorBendBothDirections) {
                                       request(location(bent_b), location(finish)));
     const auto& leg = route.trip().routes(0).legs(0);
     ASSERT_EQ(leg.node_size(), 2); // exactly one graph edge
-    ASSERT_EQ(midgard::decode<std::vector<midgard::PointLL>>(leg.shape()),
-              (std::vector<midgard::PointLL>{bent_b, finish}));
+    const auto routed = midgard::decode<std::vector<midgard::PointLL>>(leg.shape());
+    // Reverse clipping retains B twice. Preserve that actual input too, as
+    // well as the minimal two-point partial-origin counterexample.
+    const std::vector<midgard::PointLL> expected = finish == bent_a
+        ? std::vector<midgard::PointLL>{bent_b, bent_b, bent_a}
+        : std::vector<midgard::PointLL>{bent_b, bent_c};
+    ASSERT_EQ(routed, expected);
     expect_exact_shape({bent_b, finish}, bent_edge_map);
+    expect_exact_shape(routed, bent_edge_map);
   }
 }
 
