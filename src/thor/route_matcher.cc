@@ -83,7 +83,15 @@ bool check_shape(const graph_tile_ptr& tile,
   if (segment + 1 == edge_shape.size()) {
     return false;
   }
-  auto previous = first.Project(vertex(segment), vertex(segment + 1));
+  // An origin at an interior bend belongs to the outgoing segment. The
+  // preceding segment also contains that endpoint, but cannot prove its tail.
+  while (segment + 1 < edge_shape.size() &&
+         first.ApproximatelyEqual(vertex(segment + 1), codec_epsilon)) {
+    ++segment;
+  }
+  auto previous = segment + 1 < edge_shape.size()
+                      ? first.Project(vertex(segment), vertex(segment + 1))
+                      : vertex(segment);
   for (uint32_t j = from + 1; j <= to; ++j) {
     const auto point = to_ll(shape.Get(j).ll());
     if (segment + 1 == edge_shape.size()) {
