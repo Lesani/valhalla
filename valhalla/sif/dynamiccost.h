@@ -1400,20 +1400,30 @@ public:
    * 24M labels and std::bad_alloc on Europe tiles; a phone has far less.
    * A capped search fails like an unroutable one.
    *
-   * Patch 0034: a request may set its own cap (search_label_cap, floored at
-   * kMinLoopSearchLabelCap); 0 keeps this default. 300k (was 2M): a stalled
-   * search at 2M added ~480 MB to a 30 min loop plan (Oberwang, adventure,
-   * 256 MB tile cache); at 300k the same plan adds a few MB and the loop
-   * harness keeps its fit and redrive. At 150k a 300 km adventure loop no
-   * longer reaches its band.
+   * Patch 0034: a request may set its own cap (search_label_cap); 0 keeps
+   * this default. 300k (was 2M): a stalled search at 2M added ~480 MB to a
+   * 30 min loop plan (Oberwang, adventure, 256 MB tile cache); at 300k the
+   * same plan adds a few MB and the loop harness keeps its fit and redrive.
+   * At 150k a 300 km adventure loop no longer reaches its band.
+   *
+   * Patch 0049: a sent cap applies to every request, plain or loop, and is
+   * never raised; loop layers only pick the default when no cap is sent. A
+   * search that crosses its cap ends with
+   * PathAlgorithm::search_budget_exhausted() set (error 447), never with a
+   * route. A cap is no loop layer (no hop guard, no transition scale).
    */
   static constexpr uint32_t kLoopSearchLabelCap = 300000;
-  static constexpr uint32_t kMinLoopSearchLabelCap = 50000;
+  /**
+   * Patch 0049: the cap a loop request gets when it sends none. Only tests
+   * lower it (so a small map can exhaust the loop default); it is
+   * kLoopSearchLabelCap everywhere else.
+   */
+  static inline uint32_t loop_search_label_cap_default = kLoopSearchLabelCap;
   uint32_t SearchLabelCap() const {
-    if (!LoopLayersActive()) {
-      return 0;
+    if (search_label_cap_ > 0) {
+      return search_label_cap_; // the request's cap, plain or loop
     }
-    return search_label_cap_ > 0 ? search_label_cap_ : kLoopSearchLabelCap;
+    return LoopLayersActive() ? loop_search_label_cap_default : 0;
   }
   /** True on a loop or arc request: any loop-guidance layer is set. */
   bool LoopLayersActive() const {

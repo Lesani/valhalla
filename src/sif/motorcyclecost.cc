@@ -271,11 +271,11 @@ void ParseLoopGuidance(const rapidjson::Value& json, Costing::Options* co) {
   if (auto g = rapidjson::get_optional<uint32_t>(json, "/gate_lookahead"); g) {
     co->set_gate_lookahead(std::min<uint32_t>(*g, 8));
   }
-  // Patch 0034: /search_label_cap, the most edge labels one loop search may
-  // create (0 = the default). Floored at kMinLoopSearchLabelCap: below it a
-  // plain 30 min loop leg already fails.
+  // Patch 0034/0049: /search_label_cap, the most edge labels one path search
+  // may create, taken as sent (never raised). 0 or absent = none on a plain
+  // route, the loop default on a loop.
   if (auto c = rapidjson::get_optional<uint32_t>(json, "/search_label_cap"); c) {
-    co->set_search_label_cap(*c == 0 ? 0u : std::max(*c, DynamicCost::kMinLoopSearchLabelCap));
+    co->set_search_label_cap(*c);
   }
   // Patch 0035: /max_roughness, the worst surface byte the rider accepts
   // (0-7, rounded; a float or an int on the wire). Not a loop layer: it
@@ -1440,21 +1440,36 @@ TEST(MotorcycleCost, LoopRequestsBoundTheSearch) {
   EXPECT_GT(lookahead.SearchLabelCap(), 0u);
 }
 
-TEST(MotorcycleCost, LoopRequestsMaySetTheirOwnLabelCap) {
-  // Patch 0034: a loop request's own cap, floored; 0 keeps the default; a
-  // plain route stays unbounded whatever it asks.
+TEST(MotorcycleCost, RequestsMaySetTheirOwnLabelCap) {
+  // Patch 0049: a sent cap is taken as sent, plain or loop, never raised; 0
+  // keeps the loop default on a loop and no cap on a plain route.
   TestMotorcyclePreferred own(
       parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":120000})"));
   EXPECT_EQ(own.SearchLabelCap(), 120000u);
   TestMotorcyclePreferred tiny(
       parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":10})"));
-  EXPECT_EQ(tiny.SearchLabelCap(), DynamicCost::kMinLoopSearchLabelCap);
+  EXPECT_EQ(tiny.SearchLabelCap(), 10u);
   TestMotorcyclePreferred zero(
       parse_preferred_costing("motorcycle", R"({"reuse_factor":4,"search_label_cap":0})"));
   EXPECT_EQ(zero.SearchLabelCap(), DynamicCost::kLoopSearchLabelCap);
   TestMotorcyclePreferred plain(
       parse_preferred_costing("motorcycle", R"({"search_label_cap":120000})"));
-  EXPECT_EQ(plain.SearchLabelCap(), 0u);
+  EXPECT_EQ(plain.SearchLabelCap(), 120000u);
+  TestMotorcyclePreferred plain_one(
+      parse_preferred_costing("motorcycle", R"({"search_label_cap":1})"));
+  EXPECT_EQ(plain_one.SearchLabelCap(), 1u);
+  TestMotorcyclePreferred plain_zero(
+      parse_preferred_costing("motorcycle", R"({"search_label_cap":0})"));
+  EXPECT_EQ(plain_zero.SearchLabelCap(), 0u);
+}
+
+TEST(MotorcycleCost, ALabelCapIsNoLoopLayer) {
+  // Patch 0049: a cap on a plain route bounds the search but switches on no
+  // loop guidance (no hop guard, no transition scale).
+  TestMotorcyclePreferred plain(
+      parse_preferred_costing("motorcycle", R"({"search_label_cap":120000})"));
+  EXPECT_FALSE(plain.LoopLayersActive());
+  EXPECT_FLOAT_EQ(plain.LoopTransitionScale(), 1.0f);
 }
 
 TEST(MotorcycleCost, MaxRoughnessParsedClampedAndRounded) {

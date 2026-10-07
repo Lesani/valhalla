@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <new>
 #include <unordered_set>
 
 using namespace valhalla;
@@ -553,6 +554,7 @@ void thor_worker_t::centroid(Api& request) {
 void thor_worker_t::route(Api& request) {
   // time this whole method and save that statistic
   auto _ = measure_scope_time(request);
+  path_searches_ = 0;
 
   auto& options = *request.mutable_options();
   adjust_locations(request);
@@ -668,8 +670,28 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
   // TODO(nils): why not others with destonly pruning? it gets a 2nd pass as well
   cost->set_allow_destination_only(path_algorithm == &bidir_astar ? false : true);
 
+  // Patch 0049: a search that runs out of memory is error 448 (HTTP 503), not
+  // the generic 499 a std::bad_alloc would become in thor_worker_t::work.
+  const auto search = [&]() {
+    ++path_searches_;
+    try {
+      return path_algorithm->GetBestPath(origin, destination, *reader, mode_costing, mode, options);
+    } catch (const std::bad_alloc&) {
+      try {
+        LOG_ERROR("Path search ran out of memory"); // best effort: logging allocates too
+      } catch (...) {}
+      throw valhalla_exception_t{448};
+    }
+  };
+
   cost->set_pass(0);
-  auto paths = path_algorithm->GetBestPath(origin, destination, *reader, mode_costing, mode, options);
+  auto paths = search();
+  // Patch 0049: an exhausted label budget ends the request at once -- no relaxed
+  // retry, no low-reachability retry, no lookahead reading it as "clean". No
+  // caller in this file catches it.
+  if (path_algorithm->search_budget_exhausted()) {
+    throw valhalla_exception_t{447};
+  }
 
   // Check if we should run a second pass pedestrian route with different A*
   // (to look for better routes where a ferry is taken)
@@ -702,8 +724,10 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
     cost->set_allow_conditional_destination(true);
     path_algorithm->set_not_thru_pruning(false);
     // Get the best path. Return if not empty (else return the original path)
-    auto relaxed_paths =
-        path_algorithm->GetBestPath(origin, destination, *reader, mode_costing, mode, options);
+    auto relaxed_paths = search();
+    if (path_algorithm->search_budget_exhausted() && paths.empty()) {
+      throw valhalla_exception_t{447};
+    }
     if (!relaxed_paths.empty()) {
       return relaxed_paths;
     }
@@ -894,6 +918,8 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
   auto origin = ++correlated.rbegin();
   while (origin != correlated.rend()) {
     auto destination = std::prev(origin);
+    // Patch 0049: an exhausted search throws 447 inside route_two_locations,
+    // so the low-reachability retry below never sees it.
     if (!route_two_locations(origin, destination)) {
       // if routing failed because an intermediate waypoint was snapped to the low reachability road
       // (such road lies in a small connectivity component that is not connected to other locations)
@@ -1039,6 +1065,8 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
         leg_cost.SetHierarchyLimits(ahead_alg == &bidir_astar ? hierarchy_limits_bidir
                                                               : hierarchy_limits_unidir);
         leg_cost.SetGateBackEdges(gate_back_edges(to, *reader));
+        // Patch 0049: an exhausted `ahead` (or `again`) search throws 447 out of
+        // get_path; an empty `ahead` below is a real "no road", never exhaustion.
         auto ahead = this->get_path(ahead_alg, from, to, costing, api);
         leg_cost.SetGateBackEdges(gate_back_edges(*destination, *reader));
         for (const auto& id : added) {
@@ -1182,6 +1210,8 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
       destination = correlated.begin() + at;
       continue;
     }
+    // Patch 0049: an exhausted search throws 447 inside route_two_locations,
+    // so the low-reachability retry below never sees it.
     if (!routed) {
       // if routing failed because an intermediate waypoint was snapped to the low reachability road
       // (such road lies in a small connectivity component that is not connected to other locations)

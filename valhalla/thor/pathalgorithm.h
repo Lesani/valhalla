@@ -7,6 +7,8 @@
 #include <valhalla/thor/edgestatus.h>
 #include <valhalla/thor/pathinfo.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -90,6 +92,15 @@ public:
   }
 
   /**
+   * Patch 0049: did the last GetBestPath stop because it crossed the
+   * request's search label cap (sif::DynamicCost::SearchLabelCap)? Such a
+   * search returns no path, and route_action turns it into error 447.
+   */
+  bool search_budget_exhausted() const {
+    return search_budget_exhausted_;
+  }
+
+  /**
    *
    * There is a rare case where we may encounter only_restrictions with edges being
    * marked as not_thru.  Basically the only way to get in this area is via one edge
@@ -153,6 +164,21 @@ protected:
 
   // if `true` clean reserved memory for edge labels
   bool clear_reserved_memory_;
+
+  // Patch 0049: one expansion adds at most a node's edges on every level
+  // (< 400); 4096 covers both directions of one loop turn.
+  static constexpr uint32_t kLabelCapSlack = 4096;
+  // Patch 0049: the labels to reserve for one direction of a search: the
+  // configured count, never more than the request's cap plus the slack the
+  // `>` cap check can overshoot by (cap 0 = no cap).
+  static uint32_t LabelReservation(uint32_t configured, uint32_t cap) {
+    return cap == 0 ? configured
+                    : static_cast<uint32_t>(
+                          std::min<uint64_t>(configured, uint64_t{cap} + kLabelCapSlack));
+  }
+
+  // Patch 0049: set when the last search crossed its label cap.
+  bool search_budget_exhausted_ = false;
 };
 
 /**

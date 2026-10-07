@@ -48,6 +48,8 @@ void UnidirectionalAStar<expansion_direction, FORWARD>::Clear() {
 
   // Set the ferry flag to false
   has_ferry_ = false;
+  // Patch 0049: no search, no exhaustion
+  search_budget_exhausted_ = false;
 }
 
 template void UnidirectionalAStar<ExpansionType::forward>::Clear();
@@ -480,6 +482,7 @@ std::vector<std::vector<PathInfo>> UnidirectionalAStar<expansion_direction, FORW
     const sif::mode_costing_t& mode_costing,
     const travel_mode_t mode,
     const Options& /*options*/) {
+  search_budget_exhausted_ = false;
   // Set the mode and costing
   mode_ = mode;
   costing_ = mode_costing[static_cast<uint32_t>(mode_)];
@@ -529,10 +532,11 @@ std::vector<std::vector<PathInfo>> UnidirectionalAStar<expansion_direction, FORW
       (*interrupt)();
     }
 
-    // Vamoto patch 0033: a loop request's search is bounded (see
-    // DynamicCost::SearchLabelCap).
+    // Vamoto patch 0033/0049: a search with a label cap is bounded (see
+    // DynamicCost::SearchLabelCap); crossing it is error 447, not "no path".
     if (const auto cap = costing_->SearchLabelCap(); cap > 0 && edgelabels_.size() > cap) {
       LOG_WARN("Search label cap reached: n = " + std::to_string(edgelabels_.size()));
+      search_budget_exhausted_ = true;
       return {};
     }
 
@@ -647,7 +651,10 @@ void UnidirectionalAStar<expansion_direction, FORWARD>::Init(const midgard::Poin
     astarheuristic_.Init(origll, costing_->AStarCostFactor());
     mincost = astarheuristic_.Get(destll);
   }
-  edgelabels_.reserve(std::min(max_reserved_labels_count_, kInitialEdgeLabelCountAstar));
+  // Patch 0049: never more than the request's cap plus slack.
+  edgelabels_.reserve(
+      LabelReservation(std::min(max_reserved_labels_count_, kInitialEdgeLabelCountAstar),
+                       costing_->SearchLabelCap()));
 
   // Construct adjacency list, clear edge status.
   // Set bucket size and cost range based on DynamicCost.

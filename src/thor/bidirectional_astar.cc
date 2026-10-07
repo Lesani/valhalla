@@ -99,6 +99,8 @@ void BidirectionalAStar::Clear() {
 
   // Set the ferry flag to false
   has_ferry_ = false;
+  // Patch 0049: no search, no exhaustion
+  search_budget_exhausted_ = false;
   // Set not thru pruning to true
   set_not_thru_pruning(true);
   // reset origin & destination pruning states
@@ -116,9 +118,12 @@ void BidirectionalAStar::Init(const PointLL& origll, const PointLL& destll) {
   astarheuristic_reverse_.Init(origll, factor);
 
   // Reserve size for edge labels - do this here rather than in constructor so
-  // to limit how much extra memory is used for persistent objects
-  edgelabels_forward_.reserve(max_reserved_labels_count_);
-  edgelabels_reverse_.reserve(max_reserved_labels_count_);
+  // to limit how much extra memory is used for persistent objects. Patch
+  // 0049: never more per direction than the request's cap plus slack.
+  label_cap_ = costing_->SearchLabelCap();
+  const uint32_t label_reserve = LabelReservation(max_reserved_labels_count_, label_cap_);
+  edgelabels_forward_.reserve(label_reserve);
+  edgelabels_reverse_.reserve(label_reserve);
 
   // Construct adjacency list and initialize edge status lookup.
   // Set bucket size and cost range based on DynamicCost.
@@ -145,7 +150,6 @@ void BidirectionalAStar::Init(const PointLL& origll, const PointLL& destll) {
   // the threshold is set.
   cost_threshold_ = std::numeric_limits<float>::max();
   iterations_threshold_ = std::numeric_limits<uint32_t>::max();
-  label_cap_ = costing_->SearchLabelCap();
   auto& hierarchy_limits = costing_->GetHierarchyLimits();
   ignore_hierarchy_limits_ =
       std::all_of(hierarchy_limits.begin() + 1,
@@ -531,6 +535,7 @@ BidirectionalAStar::GetBestPath(valhalla::Location& origin,
                      origin.correlation().edges(0).ll().lat());
   PointLL destination_new(destination.correlation().edges(0).ll().lng(),
                           destination.correlation().edges(0).ll().lat());
+  search_budget_exhausted_ = false;
   Init(origin_new, destination_new);
 
   // we use a non varying time for all time dependent routes until we can figure out how to vary the
@@ -598,19 +603,24 @@ BidirectionalAStar::GetBestPath(valhalla::Location& origin,
       (*interrupt)();
     }
 
+    // Vamoto patch 0033/0049: a search with a label cap is bounded (see
+    // DynamicCost::SearchLabelCap). Crossing the cap ends the search with no
+    // path, even when a connection exists: only the cost threshold below
+    // proves a connection best. This check runs before every other way the
+    // search can end -- the alternatives' iterations threshold, the cost
+    // threshold, an empty frontier -- so the cap wins over all of them
+    // (error 447).
+    if (label_cap_ > 0 && (edgelabels_reverse_.size() + edgelabels_forward_.size()) > label_cap_) {
+      LOG_WARN("Search label cap reached: n = " + std::to_string(edgelabels_forward_.size()) + "," +
+               std::to_string(edgelabels_reverse_.size()) +
+               (best_connections_.empty() ? " (no connection)" : " (connection not proven best)"));
+      search_budget_exhausted_ = true;
+      return {}; // never FormPath here: a connection found so far is not proven best
+    }
+
     // Terminate if the iterations threshold has been exceeded.
     if ((edgelabels_reverse_.size() + edgelabels_forward_.size()) > iterations_threshold_) {
       return FormPath(graphreader, options, origin, destination, forward_time_info);
-    }
-    // Vamoto patch 0033: a loop request's search is bounded (see
-    // DynamicCost::SearchLabelCap).
-    if (label_cap_ > 0 && (edgelabels_reverse_.size() + edgelabels_forward_.size()) > label_cap_) {
-      LOG_WARN("Search label cap reached: n = " + std::to_string(edgelabels_forward_.size()) + "," +
-               std::to_string(edgelabels_reverse_.size()));
-      if (!best_connections_.empty()) {
-        return FormPath(graphreader, options, origin, destination, forward_time_info);
-      }
-      return {};
     }
 
     // Get the next predecessor (based on which direction was expanded in prior step)

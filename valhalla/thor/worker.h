@@ -143,6 +143,10 @@ protected:
   double min_linear_cost_factor;
   uint64_t max_linear_cost_edges;
 
+  // Patch 0049: path searches (GetBestPath calls) of the current route
+  // request, so tests can tell which search of a request ended it.
+  uint32_t path_searches_ = 0;
+
 private:
   std::string service_name() const override {
     return "thor";

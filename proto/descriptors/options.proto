@@ -440,9 +440,10 @@ message Costing {
     // arrival (a dead-end valley behind the gate), the crossing is dropped and
     // the leg re-routed, up to gate_lookahead times.
     uint32 gate_lookahead = 119;
-    // search label cap (patch 0034): the most edge labels one path search of
-    // a loop request may create (0 = the engine default,
-    // DynamicCost::kLoopSearchLabelCap). A phone sets what its memory carries.
+    // search label cap (patch 0034/0049): the most edge labels one path search
+    // may create, plain or loop, never raised (0 = none on a plain route, the
+    // engine default DynamicCost::kLoopSearchLabelCap on a loop). Crossing it
+    // fails the request with error 447. A phone sets what its memory carries.
     uint32 search_label_cap = 120;
     // road-roughness tolerance (patch 0035): the worst baldr::Surface byte
     // (0 paved_smooth .. 7 impassable) the rider is happy on. Rougher edges

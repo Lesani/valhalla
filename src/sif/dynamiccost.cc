@@ -275,7 +275,7 @@ DynamicCost::DynamicCost(const Costing& costing,
   jitter_cell_ = co.has_jitter_cell() ? std::max(0.0f, co.jitter_cell()) : 0.0f;
   nice_weight_ = co.has_nice_weight() ? std::max(0.0f, co.nice_weight()) : 0.0f;
   gate_lookahead_ = std::min<uint32_t>(co.gate_lookahead(), 8);
-  // Patch 0034: a request's own label cap for loop searches.
+  // Patch 0034/0049: a request's own label cap, for every search it makes.
   search_label_cap_ = co.search_label_cap();
   // Patch 0035: the rider's road-roughness tolerance.
   max_roughness_ = co.has_max_roughness() ? std::min(co.max_roughness(), kMaxRoughness)
