@@ -6,9 +6,11 @@
 #include "thor/worker.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <new>
+#include <optional>
 #include <unordered_set>
 
 using namespace valhalla;
@@ -511,6 +513,104 @@ std::unordered_set<GraphId> gate_back_edges(const valhalla::Location& loc,
   return out;
 }
 
+/**
+ * Patch 0050: whether the search ending at `destination` runs with pruned
+ * hierarchy limits although the request's costing disables pruning (the
+ * caller's prune_hierarchy, or loki's per-pair distance culling). Errors of
+ * such a pair say so (`pruned`), so a 442 there reads as a pruning failure.
+ */
+bool searched_pruned(const Options& options, const valhalla::Location& destination) {
+  if (!destination.prune_hierarchy()) {
+    return false;
+  }
+  const auto costing = options.costings().find(options.costing_type());
+  return costing != options.costings().end() &&
+         costing->second.options().disable_hierarchy_pruning();
+}
+
+/**
+ * Patch 0050: the hierarchy limits of a route request's path searches. One
+ * vector per algorithm (bidirectional, unidirectional) and per pruning state:
+ * a search that ends at a location with prune_hierarchy uses the config's
+ * default limits even when the costing sets disable_hierarchy_pruning. Each
+ * vector keeps its own DefaultHierarchyLimits flag (unidirectional A* modulates
+ * default limits only); both are set together on the costing. A vector is
+ * checked (clamped / defaulted, as before) the first time it is used, and never
+ * changed after: the relaxed second pass in get_path relaxes the costing's copy.
+ */
+class RequestHierarchyLimits {
+public:
+  RequestHierarchyLimits(const cost_ptr_t& cost,
+                         const Costing_Options& costing_options,
+                         const hierarchy_limits_config_t& config_bidir,
+                         const hierarchy_limits_config_t& config_unidir,
+                         const bool allow_modifications)
+      : cost_(cost), costing_options_(costing_options), config_bidir_(config_bidir),
+        config_unidir_(config_unidir), allow_modifications_(allow_modifications) {
+    // the costing's limits as the user sent them, before any search
+    for (auto& set : sets_) {
+      set.limits = cost_->GetHierarchyLimits();
+    }
+  }
+
+  // Sets the limits for a search of the given algorithm ending at `destination`
+  // on the costing.
+  void apply(const bool bidirectional, const valhalla::Location& destination) {
+    const bool pruned = destination.prune_hierarchy() && costing_options_.disable_hierarchy_pruning();
+    auto& set = sets_[(bidirectional ? 0 : 1) + (pruned ? 2 : 0)];
+    if (!set.checked) {
+      // A pruned set is checked as if the costing did not disable pruning. Like
+      // the unpruned check, this also sets the costing's default-limits flag; it
+      // is true when the user sent no limits, the same value either way.
+      std::optional<Costing_Options> pruning;
+      if (pruned) {
+        pruning = costing_options_;
+        pruning->set_disable_hierarchy_pruning(false);
+      }
+      warn_ = check_hierarchy_limits(set.limits, cost_, pruned ? *pruning : costing_options_,
+                                     bidirectional ? config_bidir_ : config_unidir_,
+                                     allow_modifications_, cost_->UseHierarchyLimits()) ||
+              warn_;
+      set.default_limits = cost_->DefaultHierarchyLimits();
+      set.checked = true;
+    }
+    cost_->SetHierarchyLimits(set.limits);
+    cost_->SetDefaultHierarchyLimits(set.default_limits);
+  }
+
+  // Whether user supplied limits had to be changed (warnings 209 / 210).
+  bool warn() const {
+    return warn_;
+  }
+
+private:
+  struct Set {
+    std::vector<HierarchyLimits> limits;
+    bool default_limits = true;
+    bool checked = false;
+  };
+  cost_ptr_t cost_;
+  const Costing_Options& costing_options_;
+  const hierarchy_limits_config_t& config_bidir_;
+  const hierarchy_limits_config_t& config_unidir_;
+  const bool allow_modifications_;
+  // bidirectional, unidirectional, pruned bidirectional, pruned unidirectional
+  std::array<Set, 4> sets_;
+  bool warn_ = false;
+};
+
+/**
+ * Patch 0050: between the pairs of a request, and before assembly, the tile
+ * cache drops what it holds once it is over its size (as at the end of a
+ * request). Searches and paths keep GraphIds only; the next reads load tiles
+ * again.
+ */
+void trim_tile_cache(GraphReader& reader) {
+  if (reader.OverCommitted()) {
+    reader.Trim();
+  }
+}
+
 } // namespace
 
 namespace valhalla {
@@ -689,8 +789,15 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
   // Patch 0049: an exhausted label budget ends the request at once -- no relaxed
   // retry, no low-reachability retry, no lookahead reading it as "clean". No
   // caller in this file catches it.
+  // Patch 0050: the error names the pair (original indices). A gate
+  // lookahead's `ahead` search runs from a copy of the gate: pair (gate, next).
+  const auto exhausted = [&]() {
+    return valhalla_exception_t{447, origin.correlation().original_index(),
+                                destination.correlation().original_index(),
+                                searched_pruned(options, destination)};
+  };
   if (path_algorithm->search_budget_exhausted()) {
-    throw valhalla_exception_t{447};
+    throw exhausted();
   }
 
   // Check if we should run a second pass pedestrian route with different A*
@@ -726,7 +833,7 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
     // Get the best path. Return if not empty (else return the original path)
     auto relaxed_paths = search();
     if (path_algorithm->search_budget_exhausted() && paths.empty()) {
-      throw valhalla_exception_t{447};
+      throw exhausted();
     }
     if (!relaxed_paths.empty()) {
       return relaxed_paths;
@@ -751,18 +858,12 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
 
   graph_tile_ptr tile = nullptr;
 
-  // get the user provided hierarchy limits and store one for each path algorithm
-  // because we may use them interchangeably
-  std::vector<HierarchyLimits> hierarchy_limits_bidir =
-      mode_costing[static_cast<uint32_t>(mode)]->GetHierarchyLimits();
-  std::vector<HierarchyLimits> hierarchy_limits_unidir =
-      mode_costing[static_cast<uint32_t>(mode)]->GetHierarchyLimits();
-
-  // check whether hierarchy limits were already checked for this algorithm
-  // on a multi-leg route
-  bool used_unidir = false;
-  bool used_bidir = false;
-  bool add_hierarchy_limits_warning = false;
+  // Patch 0050: the user provided hierarchy limits, one set per path algorithm
+  // (we may use them interchangeably) and per pruning state of the destination
+  RequestHierarchyLimits hierarchy_limits(mode_costing[static_cast<uint32_t>(mode)], costing_options,
+                                          hierarchy_limits_config_bidirectional_astar,
+                                          hierarchy_limits_config_astar,
+                                          allow_hierarchy_limits_modifications);
 
   auto route_two_locations = [&](auto& origin, auto& destination) -> bool {
     // Get the algorithm type for this location pair
@@ -772,23 +873,7 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
 
     // once we know which algorithm will be used, set the hierarchy limits accordingly
     bool is_bidir = path_algorithm == &bidir_astar;
-    auto& hierarchy_limits = is_bidir ? hierarchy_limits_bidir : hierarchy_limits_unidir;
-
-    // only check hierarchy limits if not already done for the current algorithm
-    add_hierarchy_limits_warning =
-        (!(is_bidir ? used_bidir : used_unidir) &&
-         check_hierarchy_limits(hierarchy_limits, mode_costing[static_cast<uint32_t>(mode)],
-                                costing_options,
-                                path_algorithm == &bidir_astar
-                                    ? hierarchy_limits_config_bidirectional_astar
-                                    : hierarchy_limits_config_astar,
-                                allow_hierarchy_limits_modifications,
-                                mode_costing[int(mode)]->UseHierarchyLimits())) ||
-        add_hierarchy_limits_warning;
-
-    // ..and mark hierarchy limits for this algorithm as checked
-    is_bidir ? (used_bidir = true) : (used_unidir = true);
-    mode_costing[static_cast<uint32_t>(mode)]->SetHierarchyLimits(hierarchy_limits);
+    hierarchy_limits.apply(is_bidir, *destination);
 
     algorithms.push_back(path_algorithm->name());
     LOG_INFO(std::string("algorithm::") + path_algorithm->name());
@@ -885,6 +970,7 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
           route->mutable_legs()->Reserve(options.locations_size());
         }
         auto& leg = *route->mutable_legs()->Add();
+        trim_tile_cache(*reader);
         TripLegBuilder::Build(options, controller, *reader, mode_costing, path.begin(), path.end(),
                               *origin, *destination, leg, algorithms, interrupt, edge_trimming,
                               intermediates);
@@ -921,6 +1007,10 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
     // Patch 0049: an exhausted search throws 447 inside route_two_locations,
     // so the low-reachability retry below never sees it.
     if (!route_two_locations(origin, destination)) {
+      // Patch 0050: a 442 names the failed pair (original indices).
+      const int64_t failed_origin = origin->correlation().original_index();
+      const int64_t failed_destination = destination->correlation().original_index();
+      const bool failed_pruned = searched_pruned(options, *destination);
       // if routing failed because an intermediate waypoint was snapped to the low reachability road
       // (such road lies in a small connectivity component that is not connected to other locations)
       // we should leave only high reachability candidates and try to route again
@@ -936,7 +1026,7 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
           // it doesn't make sense to continue if there are no more path edges
           if (loc->correlation().edges_size() == 0)
             // no route found
-            throw valhalla_exception_t{442};
+            throw valhalla_exception_t{442, failed_origin, failed_destination, failed_pruned};
         }
         // resets the entire state of all the legs of the route and starts completely
         // over from the beginning doing all the legs over
@@ -950,13 +1040,14 @@ void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
         continue;
       }
       // no route found
-      throw valhalla_exception_t{442};
+      throw valhalla_exception_t{442, failed_origin, failed_destination, failed_pruned};
     }
+    trim_tile_cache(*reader);
     ++origin;
   }
 
   // maybe warn if we needed to change user provided hierarchy limits
-  if (add_hierarchy_limits_warning)
+  if (hierarchy_limits.warn())
     add_warning(api, allow_hierarchy_limits_modifications ? 210 : 209);
   // Reverse the legs because protobuf only has adding to the end
   std::reverse(route->mutable_legs()->begin(), route->mutable_legs()->end());
@@ -977,18 +1068,14 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
   valhalla::Trip& trip = *api.mutable_trip();
   trip.mutable_routes()->Reserve(options.alternates() + 1);
 
-  // get the user provided hierarchy limits and store one for each path algorithm
-  // because we may use them interchangeably
-  auto hierarchy_limits_bidir = mode_costing[static_cast<uint32_t>(mode)]->GetHierarchyLimits();
+  // Patch 0050: the user provided hierarchy limits, one set per path algorithm
+  // (we may use them interchangeably) and per pruning state of the destination
   // TODO: what about multimodal costing? we need to check the  hierarchy limits for all
   // costings that use hierarchy limits
-  auto hierarchy_limits_unidir = mode_costing[static_cast<uint32_t>(mode)]->GetHierarchyLimits();
-
-  // check whether hierarchy limits were already checked for this algorithm
-  // on a multi-leg route
-  bool used_unidir = false;
-  bool used_bidir = false;
-  bool add_hierarchy_limits_warning = false;
+  RequestHierarchyLimits hierarchy_limits(mode_costing[static_cast<uint32_t>(mode)], costing_options,
+                                          hierarchy_limits_config_bidirectional_astar,
+                                          hierarchy_limits_config_astar,
+                                          allow_hierarchy_limits_modifications);
 
   graph_tile_ptr tile = nullptr;
   // Patch 0030: the reuse penalty exempts edges near the first location.
@@ -1006,23 +1093,8 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
     LOG_INFO(std::string("algorithm::") + path_algorithm->name());
 
     // once we know which algorithm will be used, set the hierarchy limits accordingly
-    bool is_bidir = path_algorithm == &bidir_astar;
-    auto& hierarchy_limits = is_bidir ? hierarchy_limits_bidir : hierarchy_limits_unidir;
-
-    // only check hierarchy limits if not already done for the current algorithm
-    add_hierarchy_limits_warning =
-        (!(is_bidir ? used_bidir : used_unidir) &&
-         check_hierarchy_limits(hierarchy_limits, mode_costing[static_cast<uint32_t>(mode)],
-                                costing_options,
-                                path_algorithm == &bidir_astar
-                                    ? hierarchy_limits_config_bidirectional_astar
-                                    : hierarchy_limits_config_astar,
-                                allow_hierarchy_limits_modifications,
-                                mode_costing[static_cast<uint32_t>(mode)]->UseHierarchyLimits())) ||
-        add_hierarchy_limits_warning;
-    // ..and mark hierarchy limits for this algorithm as checked
-    is_bidir ? (used_bidir = true) : (used_unidir = true);
-    mode_costing[static_cast<uint32_t>(mode)]->SetHierarchyLimits(hierarchy_limits);
+    const bool is_bidir = path_algorithm == &bidir_astar;
+    hierarchy_limits.apply(is_bidir, *destination);
 
     // If we are continuing through a location we need to make sure we
     // only allow the edge that was used previously (avoid u-turns)
@@ -1062,8 +1134,8 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
         valhalla::Location to = *std::next(destination);
         auto* ahead_alg = this->get_path_algorithm(costing, from, to, api);
         ahead_alg->Clear();
-        leg_cost.SetHierarchyLimits(ahead_alg == &bidir_astar ? hierarchy_limits_bidir
-                                                              : hierarchy_limits_unidir);
+        // Patch 0050: `ahead` is a search of the next pair: its destination's limits.
+        hierarchy_limits.apply(ahead_alg == &bidir_astar, to);
         leg_cost.SetGateBackEdges(gate_back_edges(to, *reader));
         // Patch 0049: an exhausted `ahead` (or `again`) search throws 447 out of
         // get_path; an empty `ahead` below is a real "no road", never exhaustion.
@@ -1083,15 +1155,14 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
                           [&arrival](const auto& e) { return e.graph_id() == arrival; });
         path_algorithm = this->get_path_algorithm(costing, *origin, *destination, api);
         path_algorithm->Clear();
-        leg_cost.SetHierarchyLimits(path_algorithm == &bidir_astar ? hierarchy_limits_bidir
-                                                                   : hierarchy_limits_unidir);
+        hierarchy_limits.apply(path_algorithm == &bidir_astar, *destination);
         auto again = this->get_path(path_algorithm, *origin, *destination, costing, api);
         if (again.size() != 1) {
           break;
         }
         temp_paths.swap(again);
       }
-      leg_cost.SetHierarchyLimits(hierarchy_limits);
+      hierarchy_limits.apply(is_bidir, *destination);
       // The last gate standing is never skipped: without one a loop is S-S.
       const auto gates_left = std::count_if(correlated.begin(), correlated.end(),
                                             [](const auto& l) { return l.has_gate_heading_case(); });
@@ -1179,6 +1250,7 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
           route->mutable_legs()->Reserve(options.locations_size());
         }
         auto& leg = *route->mutable_legs()->Add();
+        trim_tile_cache(*reader);
         thor::TripLegBuilder::Build(options, controller, *reader, mode_costing, path.begin(),
                                     path.end(), *origin, *destination, leg, algorithms, interrupt,
                                     edge_trimming, {std::next(origin), destination});
@@ -1213,6 +1285,10 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
     // Patch 0049: an exhausted search throws 447 inside route_two_locations,
     // so the low-reachability retry below never sees it.
     if (!routed) {
+      // Patch 0050: a 442 names the failed pair (original indices).
+      const int64_t failed_origin = origin->correlation().original_index();
+      const int64_t failed_destination = destination->correlation().original_index();
+      const bool failed_pruned = searched_pruned(options, *destination);
       // if routing failed because an intermediate waypoint was snapped to the low reachability road
       // (such road lies in a small connectivity component that is not connected to other locations)
       // we should leave only high reachability candidates and try to route again
@@ -1228,7 +1304,7 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
           // it doesn't make sense to continue if there are no more path edges
           if (loc->correlation().edges_size() == 0)
             // no route found
-            throw valhalla_exception_t{442};
+            throw valhalla_exception_t{442, failed_origin, failed_destination, failed_pruned};
         }
         // resets the entire state of all the legs of the route and starts completely
         // over from the beginning doing all the legs over
@@ -1243,12 +1319,13 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
         continue;
       }
       // no route found
-      throw valhalla_exception_t{442};
+      throw valhalla_exception_t{442, failed_origin, failed_destination, failed_pruned};
     }
+    trim_tile_cache(*reader);
     ++destination;
   }
   // maybe warn if we needed to change user provided hierarchy limits
-  if (add_hierarchy_limits_warning)
+  if (hierarchy_limits.warn())
     add_warning(api, allow_hierarchy_limits_modifications ? 210 : 209);
   if (skipped_gates > 0)
     add_warning(api, 217, std::to_string(skipped_gates));

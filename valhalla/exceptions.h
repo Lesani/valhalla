@@ -1,6 +1,7 @@
 #ifndef __VALHALLA_EXCEPTIONS_H__
 #define __VALHALLA_EXCEPTIONS_H__
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 
@@ -18,6 +19,19 @@ struct valhalla_exception_t : public std::runtime_error {
    * @param extra  an extra string to append to the codes existing method
    */
   valhalla_exception_t(unsigned code, const std::string& extra = "");
+  /**
+   * Patch 0050: as above, naming the request locations the error belongs to.
+   * @param code               the code to look up
+   * @param location_index     original index of the location (171) or of a failed pair's origin
+   *                           (442, 447); -1 for none
+   * @param destination_index  original index of a failed pair's destination; -1 for none
+   * @param pruned             the failed pair's search ran with pruned hierarchy limits
+   *                           although the costing disabled pruning (442, 447)
+   */
+  valhalla_exception_t(unsigned code,
+                       int64_t location_index,
+                       int64_t destination_index,
+                       bool pruned = false);
   valhalla_exception_t(unsigned code,
                        const std::string& message,
                        unsigned http_code,
@@ -36,6 +50,15 @@ struct valhalla_exception_t : public std::runtime_error {
   std::string http_message;
   std::string osrm_error;
   std::string statsd_key;
+  // Patch 0050: the original request index of the location an error belongs
+  // to (171: the location itself; 442 and 447: the failed pair's origin) and of
+  // the failed pair's destination; -1 when the error names no location.
+  int64_t location_index = -1;
+  int64_t destination_index = -1;
+  // Patch 0050: the failed pair's search ran pruned although the costing
+  // disables pruning (prune_hierarchy from the caller, or loki's per-pair
+  // distance culling): a 442 there is no proof that no road exists.
+  bool pruned = false;
 };
 
 /**

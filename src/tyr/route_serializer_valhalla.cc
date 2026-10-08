@@ -807,6 +807,32 @@ std::string serialize(Api& api) {
     writer.end_array(); // alternates
   }
 
+  // Patch 0050: the pairs whose search kept hierarchy pruning although the
+  // costing disabled it (prune_hierarchy on the destination, sent by the client
+  // or set by loki for a capped request's long pair), as [origin, destination]
+  // original location indices. Absent when there are none.
+  const auto& options = api.options();
+  const auto costing = options.costings().find(options.costing_type());
+  if (costing != options.costings().end() && costing->second.options().disable_hierarchy_pruning()) {
+    bool any = false;
+    for (int i = 1; i < options.locations_size(); ++i) {
+      if (!options.locations(i).prune_hierarchy()) {
+        continue;
+      }
+      if (!any) {
+        writer.start_array("pruned_pairs");
+        any = true;
+      }
+      writer.start_array();
+      writer(static_cast<uint64_t>(options.locations(i - 1).correlation().original_index()));
+      writer(static_cast<uint64_t>(options.locations(i).correlation().original_index()));
+      writer.end_array();
+    }
+    if (any) {
+      writer.end_array(); // pruned_pairs
+    }
+  }
+
   if (api.options().has_id_case()) {
     writer("id", api.options().id());
   }

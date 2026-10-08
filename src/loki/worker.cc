@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -418,6 +419,25 @@ void loki_worker_t::check_hierarchy_distance(Api& request) {
         }
       }
     }
+  } else if (options.action() == Options_Action_route &&
+             costing_options->second.options().search_label_cap() > 0) {
+    // Patch 0050: a capped request (its every search is bounded by the label
+    // cap) is checked pair by pair. A pair longer than the limit prunes only the
+    // search that ends at its destination (prune_hierarchy); the other pairs keep
+    // disable_hierarchy_pruning. The route response lists the pruned pairs.
+    auto& locations = *options.mutable_locations();
+    bool pruned = false;
+    for (int i = 1; i < locations.size(); ++i) {
+      if (to_ll(locations[i - 1]).Distance(to_ll(locations[i])) >
+          max_distance_disable_hierarchy_culling) {
+        locations[i].set_prune_hierarchy(true);
+        pruned = true;
+      }
+    }
+    if (pruned) {
+      add_warning(request, 205);
+    }
+    return;
   } else {
     auto locations = options.locations();
     float arc_distance = 0.0f;
@@ -517,6 +537,9 @@ loki_worker_t::work(const std::list<zmq::message_t>& job,
   } catch (const valhalla_exception_t& e) {
     LOG_WARN("400::" + std::string(e.what()) + " request_id=" + std::to_string(info.id));
     result = serialize_error(e, info, request);
+  } catch (const std::bad_alloc&) {
+    // Patch 0050: out of memory anywhere in loki is 448 (HTTP 503), not 199.
+    result = serialize_error(valhalla_exception_t{448}, info, request);
   } catch (const std::exception& e) {
     LOG_ERROR("500::" + std::string(e.what()) + " request_id=" + std::to_string(info.id));
     result = serialize_error({199, std::string(e.what())}, info, request);

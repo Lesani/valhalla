@@ -1924,6 +1924,8 @@ void TripLegBuilder::Build(
   uint64_t osmchangeset = 0;
   size_t edge_index = 0;
   const DirectedEdge* prev_de = nullptr;
+  // Patch 0050: holds the tile prev_de points into while the cache is trimmed.
+  graph_tile_ptr prev_de_tile = nullptr;
   graph_tile_ptr graphtile = nullptr;
   TimeInfo time_info = forward_time_info;
   // remember that MultimodalBuilder keeps 'time_info' as reference,
@@ -1946,6 +1948,12 @@ void TripLegBuilder::Build(
 
   // loop over the edges to build the trip leg
   for (auto edge_itr = path_begin; edge_itr != path_end; ++edge_itr, ++edge_index) {
+    // Patch 0050: a long trip reads every tile along it. At each edge the tile
+    // cache drops what it holds once it is over its size; the tiles this loop
+    // still points into stay alive through their graph_tile_ptr.
+    if (graphreader.OverCommitted()) {
+      graphreader.Trim();
+    }
     const GraphId& edge = edge_itr->edgeid;
     graphtile = graphreader.GetGraphTile(edge, graphtile);
     if (graphtile == nullptr) {
@@ -2278,6 +2286,7 @@ void TripLegBuilder::Build(
       }
       GraphId oppedge = t2->GetOpposingEdgeId(directededge);
       prev_de = t2->directededge(oppedge);
+      prev_de_tile = std::move(t2);
     }
 
     // Save the index of the opposing local directed edge at the end node

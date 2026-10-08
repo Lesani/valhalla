@@ -1,7 +1,6 @@
 #include "baldr/graphreader.h"
 #include "baldr/tilehierarchy.h"
 #include "loki/reach.h"
-#include "loki/reach.h"
 #include "loki/search.h"
 #include "loki/worker.h"
 #include "midgard/pointll.h"
@@ -9,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <new>
 #include <unordered_set>
 
 using namespace valhalla;
@@ -395,9 +395,12 @@ void loki_worker_t::route(Api& request) {
 
     // throw if there's a location we did not find any
     // candidates for
-    for (const auto& location : *locations) {
+    // Patch 0050: the error names the location (its original index; cost factor
+    // line ends appended past the request's locations name none).
+    for (int i = 0; i < locations->size(); ++i) {
+      const auto& location = locations->at(i);
       if (location.correlation().edges().empty() && location.correlation().filtered_edges().empty()) {
-        throw valhalla_exception_t(171);
+        throw valhalla_exception_t(171, i < locations_size ? int64_t(i) : int64_t(-1), int64_t(-1));
       }
     }
 
@@ -429,9 +432,11 @@ void loki_worker_t::route(Api& request) {
     // and remove the first and last cost factor lines from the locations again
     locations->DeleteSubrange(locations_size, locations->size() - locations_size);
 
-  } catch (const valhalla_exception_t& e) { throw e; } catch (const std::exception&) {
-    throw valhalla_exception_t{171};
-  }
+  } catch (const valhalla_exception_t& e) { throw e; } catch (const std::bad_alloc&) {
+    // Patch 0050: running out of memory while correlating is 448 (as in a
+    // thor path search), not "no edges near a location".
+    throw valhalla_exception_t{448};
+  } catch (const std::exception&) { throw valhalla_exception_t{171}; }
 
   // are all the locations in the same color regions
   if (!connectivity_map) {

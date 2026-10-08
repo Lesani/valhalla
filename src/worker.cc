@@ -270,6 +270,12 @@ void parse_location(valhalla::Location* location,
     location->set_gate_heading(*gate_heading % 360);
     location->set_gate_radius(*gate_radius);
   }
+  // Patch 0050: the search ending at this location keeps the default hierarchy
+  // limits even when the costing disables hierarchy pruning.
+  auto prune_hierarchy = rapidjson::get_optional<bool>(r_loc, "/prune_hierarchy");
+  if (prune_hierarchy) {
+    location->set_prune_hierarchy(*prune_hierarchy);
+  }
   auto accuracy = rapidjson::get_optional<unsigned int>(r_loc, "/accuracy");
   if (accuracy) {
     location->set_accuracy(*accuracy);
@@ -1356,6 +1362,17 @@ std::string serialize_error(const valhalla_exception_t& exception, Api& request)
     json_error->emplace("status_code", static_cast<uint64_t>(exception.http_code));
     json_error->emplace("error", std::string(exception.message));
     json_error->emplace("error_code", static_cast<uint64_t>(exception.code));
+    // Patch 0050: the location (171) or failed pair (442, 447) the error belongs to.
+    if (exception.location_index >= 0) {
+      json_error->emplace("location_index", static_cast<uint64_t>(exception.location_index));
+    }
+    if (exception.destination_index >= 0) {
+      json_error->emplace("destination_index", static_cast<uint64_t>(exception.destination_index));
+    }
+    // ... and whether that pair's search ran pruned (only when it did).
+    if (exception.pruned) {
+      json_error->emplace("pruned", true);
+    }
     body << (request.options().has_jsonp_case() ? request.options().jsonp() + "(" : "") << *json_error
          << (request.options().has_jsonp_case() ? ")" : "");
   }

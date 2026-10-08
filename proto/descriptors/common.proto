@@ -180,6 +180,11 @@ message Location {
   oneof has_gate_radius {
     uint32 gate_radius = 41; // metres each side of ll
   }
+  // Patch 0050: the path search that ends at this location uses the config's
+  // default hierarchy limits even when the costing sets
+  // disable_hierarchy_pruning. Set by the client, or by loki when a capped
+  // request's pair is longer than max_distance_disable_hierarchy_culling.
+  bool prune_hierarchy = 42;
   // This information will be ignored if provided in the request. Instead it will be filled in as the request is handled
   Correlation correlation = 90;
   string time_zone_offset = 91;

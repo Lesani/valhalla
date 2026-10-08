@@ -44,7 +44,10 @@ NB_MODULE(_valhalla, m) {
                                 ":param int code: Valhalla-internal error code.\n"
                                 ":param str message: Human-readable error message.\n"
                                 ":param int http_code: Corresponding HTTP status code.\n"
-                                ":param str http_message: Corresponding HTTP status message.\n",
+                                ":param str http_message: Corresponding HTTP status message.\n"
+                                ":param int location_index: (optional) location or failed pair origin.\n"
+                                ":param int destination_index: (optional) failed pair destination.\n"
+                                ":param bool pruned: (optional) the failed pair's search ran pruned.\n",
                                 PyExc_RuntimeError, nullptr);
   // don't increase refcount, it's static
   m.attr("ValhallaError") = nb::borrow(ValhallaError);
@@ -66,6 +69,16 @@ NB_MODULE(_valhalla, m) {
             exc.attr("message") = nb::str(e.message.c_str());
             exc.attr("http_code") = nb::int_(e.http_code);
             exc.attr("http_message") = nb::str(e.http_message.c_str());
+            // Patch 0050: the same optional keys serialize_error emits, each only when set.
+            if (e.location_index >= 0) {
+              exc.attr("location_index") = nb::int_(e.location_index);
+            }
+            if (e.destination_index >= 0) {
+              exc.attr("destination_index") = nb::int_(e.destination_index);
+            }
+            if (e.pruned) {
+              exc.attr("pruned") = nb::bool_(true);
+            }
             // Set the Python error indicator: raise exc
             PyErr_SetObject(type, exc.ptr());
           }

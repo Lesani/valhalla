@@ -178,8 +178,22 @@ valhalla_exception_t::valhalla_exception_t(unsigned code, const std::string& ext
   if (code_itr != error_codes.cend()) {
     *this = code_itr->second;
   }
+  // Patch 0050: the table entries name no location; set after the copy.
+  location_index = -1;
+  destination_index = -1;
+  pruned = false;
   if (!extra.empty())
     message += ": " + extra;
+}
+
+valhalla_exception_t::valhalla_exception_t(unsigned code,
+                                           int64_t location_index,
+                                           int64_t destination_index,
+                                           bool pruned)
+    : valhalla_exception_t(code) {
+  this->location_index = location_index;
+  this->destination_index = destination_index;
+  this->pruned = pruned;
 }
 
 // function to add warnings to proto info object
