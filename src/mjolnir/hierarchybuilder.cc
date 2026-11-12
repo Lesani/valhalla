@@ -12,6 +12,7 @@
 
 #include <boost/property_tree/ptree.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <utility>
@@ -404,8 +405,15 @@ void CreateNodeAssociations(GraphReader& reader,
   const auto& highway_level = TileHierarchy::levels()[0];
   uint32_t hl = static_cast<uint32_t>(highway_level.level);
 
-  // Iterate through all tiles in the local level
-  auto local_tiles = reader.GetTileSet();
+  // Iterate through all tiles in the local level. Vamoto: in tile id order.
+  // GetTileSet() is an unordered_set filled by walking the tile directory, so
+  // its order follows the filesystem; new node ids on the highway/arterial
+  // levels are handed out in this loop's order, which made the level-0/1
+  // tiles (and every level-2 tile that references them) differ between two
+  // builds of the same data.
+  const auto tile_set = reader.GetTileSet();
+  std::vector<GraphId> local_tiles(tile_set.begin(), tile_set.end());
+  std::sort(local_tiles.begin(), local_tiles.end());
   for (const auto& base_tile_id : local_tiles) {
     // We keep all transit data inside the transit hierarchy
     if (base_tile_id.level() == TileHierarchy::GetTransitLevel().level) {

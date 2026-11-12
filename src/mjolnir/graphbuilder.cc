@@ -565,10 +565,21 @@ void BuildTileSet(const std::string& ways_file,
       GraphId tile_id = tile.first.tile_base();
       GraphTileBuilder graphtile(tile_dir, tile_id, false);
 
-      // Information about tile creation
-      graphtile.AddTileCreationDate(tile_creation_date);
-      graphtile.header_builder().set_dataset_id(osmdata.max_changeset_id_);
-      graphtile.header_builder().set_checksum(osmdata.pbf_checksum_);
+      // Vamoto: no per-build stamps in the tile header. The creation date (days
+      // since the pivot, i.e. the build DAY), dataset_id (the highest changeset
+      // in the whole input) and checksum (md5 of the whole input PBF) differ
+      // between two builds whose data inside this tile is identical, so every
+      // tile of a weekly build looked changed and a phone re-downloaded all of
+      // them. Tile bytes must be a pure function of the tile's data. Readers:
+      // date_created only drives transit schedules (not built); dataset_id
+      // only feeds the optional osm_changeset key of /route and /status (0 =
+      // omitted); checksum only guards tile_url remote fetches (0 = a warning).
+      // The hierarchy builder and the validator copy these from the base
+      // tiles, so they are 0 on every level.
+      (void)tile_creation_date;
+      graphtile.AddTileCreationDate(0);
+      graphtile.header_builder().set_dataset_id(0);
+      graphtile.header_builder().set_checksum(0);
 
       // Set the base lat,lon of the tile
       uint32_t id = tile_id.tileid();

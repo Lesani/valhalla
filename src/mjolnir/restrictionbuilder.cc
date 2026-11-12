@@ -20,6 +20,8 @@
 #include <random>
 #include <thread>
 #include <unordered_set>
+#include <sstream>
+#include <algorithm>
 
 using namespace valhalla::midgard;
 using namespace valhalla::baldr;
@@ -300,8 +302,20 @@ void HandleOnlyRestrictionProperties(const std::vector<Result>& results,
     if (!tile)
       continue;
 
+    // Vamoto: the pointers arrive in worker-thread order, and the workers took
+    // tiles from a randomly shuffled queue, so the same restrictions were
+    // appended to this tile in a different order on every build. Append them
+    // in a total order of their content instead.
+    auto ordered = i.second;
+    std::sort(ordered.begin(), ordered.end(),
+              [](const ComplexRestrictionBuilder* a, const ComplexRestrictionBuilder* b) {
+                std::ostringstream sa, sb;
+                sa << *a;
+                sb << *b;
+                return sa.str() < sb.str();
+              });
     GraphTileBuilder tile_builder(reader.tile_dir(), tile_id, true);
-    for (auto restriction : i.second) {
+    for (auto restriction : ordered) {
       tile_builder.AddForwardComplexRestriction(*restriction);
       DirectedEdge& edge = tile_builder.directededge_builder(restriction->to_graphid().id());
       edge.set_end_restriction(edge.end_restriction() | restriction->modes());

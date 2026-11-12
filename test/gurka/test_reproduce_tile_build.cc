@@ -144,14 +144,17 @@ struct ReproducibleBuild : ::testing::Test {
 
       // human readable check
       assert_tile_equalish(*first_tile, *second_tile);
-      EXPECT_EQ(first_tile->header()->checksum(), first_pbf_md5);
-      EXPECT_EQ(second_tile->header()->checksum(), second_pbf_md5);
+      // Vamoto: the header carries no per-build stamps, so two builds of the
+      // same data are identical INCLUDING the header, although the two PBFs
+      // (and their md5s) differ.
+      EXPECT_EQ(first_tile->header()->checksum(), 0);
+      EXPECT_EQ(first_tile->header()->dataset_id(), 0);
+      EXPECT_EQ(first_tile->header()->date_created(), 0);
 
-      // check that raw tiles are equal
+      // check that raw tiles are equal, header included
       const auto raw_tile_bytes = [](const graph_tile_ptr& tile) -> std::string {
         const GraphTileHeader* header = tile->header();
-        return std::string(reinterpret_cast<const char*>(header) + sizeof(*header),
-                           header->end_offset() - sizeof(*header));
+        return std::string(reinterpret_cast<const char*>(header), header->end_offset());
       };
       const std::string first_raw_tile = raw_tile_bytes(first_tile);
       const std::string second_raw_tile = raw_tile_bytes(second_tile);

@@ -4,6 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <new>
+
 using namespace std;
 using namespace valhalla::baldr;
 using namespace valhalla::mjolnir;
@@ -16,6 +19,22 @@ namespace {
 
 TEST(ComplexRestriction, Sizeof) {
   EXPECT_EQ(sizeof(ComplexRestriction), kComplexRestrictionExpectedSize);
+}
+
+TEST(ComplexRestriction, DefaultHasNoGarbageBits) {
+  // Vamoto: the three words go to the tile verbatim; whatever the memory held
+  // before, a default restriction must serialise to the same bytes.
+  alignas(ComplexRestriction) unsigned char dirty[sizeof(ComplexRestriction)];
+  alignas(ComplexRestriction) unsigned char clean[sizeof(ComplexRestriction)];
+  std::memset(dirty, 0xA5, sizeof(dirty));
+  std::memset(clean, 0x00, sizeof(clean));
+  new (dirty) ComplexRestriction();
+  new (clean) ComplexRestriction();
+  EXPECT_EQ(std::memcmp(dirty, clean, sizeof(dirty)), 0);
+  const auto* restriction = reinterpret_cast<const ComplexRestriction*>(dirty);
+  EXPECT_EQ(restriction->begin_mins(), 0);
+  EXPECT_EQ(restriction->end_mins(), 0);
+  EXPECT_EQ(restriction->dow(), 0);
 }
 
 TEST(ComplexRestriction, WalkViasBuilder) {

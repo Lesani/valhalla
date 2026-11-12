@@ -23,6 +23,7 @@
 #include <ankerl/unordered_dense.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <limits>
@@ -958,6 +959,7 @@ void enhance(const boost::property_tree::ptree& pt,
              const OSMData& osmdata,
              const std::string& access_file,
              const boost::property_tree::ptree& hierarchy_properties,
+             const std::string& snapshot_dir,
              std::queue<GraphId>& tilequeue,
              std::mutex& lock, // guards `tilequeue`
              std::promise<enhancer_stats>& result) {
@@ -985,8 +987,19 @@ void enhance(const boost::property_tree::ptree& pt,
     country_access = GetCountryAccess(*admin_db);
   }
 
-  // Local Graphreader
-  GraphReader reader(hierarchy_properties);
+  // Local Graphreader. Vamoto: it reads the PRE-enhance snapshot, never the
+  // tiles the other threads are rewriting. Several enhancements look at the
+  // neighbour tile (stop/yield flags parked in the end node's
+  // transition_index, which the neighbour's own pass resets to 0; access after
+  // country overrides; internal-intersection and not-thru walks), so reading
+  // the live directory made the result depend on whether the neighbour had
+  // been enhanced yet -- thread timing, i.e. a different tile every build.
+  boost::property_tree::ptree snapshot_properties = hierarchy_properties;
+  snapshot_properties.put("tile_dir", snapshot_dir);
+  snapshot_properties.erase("tile_extract");
+  snapshot_properties.erase("traffic_extract");
+  GraphReader reader(snapshot_properties);
+  const std::string tile_dir = hierarchy_properties.get<std::string>("tile_dir");
 
   // Config driven speed assignment
   auto speeds_config = pt.get_optional<std::string>("default_speeds_config");
@@ -1018,7 +1031,7 @@ void enhance(const boost::property_tree::ptree& pt,
     }
 
     // Tile builder - serialize in existing tile so we can add admin names
-    graph_tile_builder_ptr tilebuilder{new GraphTileBuilder(reader.tile_dir(), tile_id, true, false)};
+    graph_tile_builder_ptr tilebuilder{new GraphTileBuilder(tile_dir, tile_id, true, false)};
 
     // this will be our updated list of restrictions.
     // need to do some conversions on weights; therefore, we must update
@@ -1428,6 +1441,25 @@ void GraphEnhancer::Enhance(const boost::property_tree::ptree& pt,
   std::shuffle(tempqueue.begin(), tempqueue.end(), std::mt19937(rd()));
   std::queue<GraphId> tilequeue(tempqueue);
 
+  // Vamoto: hard-link every local tile into a sibling snapshot directory. The
+  // builders write a temp file and rename it over the original, so the links
+  // keep the pre-enhance bytes for free; the readers look only there.
+  std::filesystem::path live_dir{hierarchy_properties.get<std::string>("tile_dir")};
+  live_dir = live_dir.lexically_normal();
+  if (live_dir.filename().empty()) {
+    live_dir = live_dir.parent_path();
+  }
+  std::filesystem::path snapshot_dir = live_dir;
+  snapshot_dir += ".enhance-src";
+  std::filesystem::remove_all(snapshot_dir);
+  for (const auto& tile_id : local_tiles) {
+    const auto suffix = GraphTile::FileSuffix(tile_id);
+    const auto target = snapshot_dir / suffix;
+    std::filesystem::create_directories(target.parent_path());
+    std::filesystem::create_hard_link(live_dir / suffix, target);
+  }
+  const std::string snapshot = snapshot_dir.string();
+
   // An atomic object we can use to do the synchronization
   std::mutex lock;
 
@@ -1437,13 +1469,16 @@ void GraphEnhancer::Enhance(const boost::property_tree::ptree& pt,
     thread =
         std::make_shared<std::thread>(enhance, std::cref(hierarchy_properties), std::cref(osmdata),
                                       std::cref(access_file), std::ref(hierarchy_properties),
-                                      std::ref(tilequeue), std::ref(lock), std::ref(results.back()));
+                                      std::cref(snapshot), std::ref(tilequeue), std::ref(lock),
+                                      std::ref(results.back()));
   }
 
   // Wait for them to finish up their work
   for (auto& thread : threads) {
     thread->join();
   }
+
+  std::filesystem::remove_all(snapshot_dir);
 
   // Check all of the outcomes, to see about maximum density (km/km2)
   enhancer_stats stats{std::numeric_limits<float>::min(), 0, 0, 0, 0, 0, 0, {0}};

@@ -5,7 +5,11 @@
 #include <boost/format.hpp>
 #include <osmium/osm/tag.hpp>
 
+#include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 extern "C" {
 #include <lauxlib.h>
@@ -110,6 +114,13 @@ Tags LuaTagTransform::Transform(OSMType type, uint64_t osmid, const osmium::TagL
     }
 
     // pull out the keys and values into a map
+    // Vamoto: lua_next walks the table in hash order, and LuaJIT seeds its
+    // string hash per process, so the order differed between two runs over
+    // the same input. Tags iterates in insertion order and the parsers act on
+    // the FIRST/LAST matching tag in several places (a node tagged
+    // amenity=parking + barrier=gate became a parking node in one build and a
+    // gate in the next), so the pairs are inserted sorted by key.
+    std::vector<std::pair<std::string, std::string>> pairs;
     lua_pushnil(state_);
     while (lua_next(state_, -2) != 0) {
       const char* key = lua_tostring(state_, -2);
@@ -122,8 +133,12 @@ Tags LuaTagTransform::Transform(OSMType type, uint64_t osmid, const osmium::TagL
         LOG_ERROR((boost::format("Invalid value in Lua function: %1%.") % lua_func).str());
         break;
       }
-      result[key] = value;
+      pairs.emplace_back(key, value);
       lua_pop(state_, 1);
+    }
+    std::sort(pairs.begin(), pairs.end());
+    for (auto& pair : pairs) {
+      result[std::move(pair.first)] = std::move(pair.second);
     }
 
     // pull out an int which if its 1 means we dont care about this way/node
