@@ -770,6 +770,13 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
   // TODO(nils): why not others with destonly pruning? it gets a 2nd pass as well
   cost->set_allow_destination_only(path_algorithm == &bidir_astar ? false : true);
 
+  // Patch 0052: a location without a candidate edge has no path. The searches
+  // read the first candidate unchecked (bidirectional A* aborted the process
+  // in EstimateReverseStartTime, Vamoto #352), so it never reaches one.
+  if (origin.correlation().edges_size() == 0 || destination.correlation().edges_size() == 0) {
+    return {};
+  }
+
   // Patch 0049: a search that runs out of memory is error 448 (HTTP 503), not
   // the generic 499 a std::bad_alloc would become in thor_worker_t::work.
   const auto search = [&]() {
@@ -819,9 +826,12 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
   if ((paths.empty() || ped_second_pass) && cost->AllowMultiPass()) {
     add_warning(request, 401);
     // add filtered edges to candidate edges for origin and destination
-    origin.mutable_correlation()->mutable_edges()->MergeFrom(origin.correlation().filtered_edges());
-    destination.mutable_correlation()->mutable_edges()->MergeFrom(
-        destination.correlation().filtered_edges());
+    // Patch 0052: each of them once. A location that gets a relaxed pass in
+    // more than one search (a gate the lookahead routes to again) must not
+    // collect the same candidate twice. Another snap of an edge that is a
+    // candidate already (other position or side) is a candidate of its own.
+    add_filtered_edges(origin);
+    add_filtered_edges(destination);
 
     path_algorithm->Clear();
     cost->set_pass(1);
@@ -841,6 +851,23 @@ std::vector<std::vector<thor::PathInfo>> thor_worker_t::get_path(PathAlgorithm* 
   }
 
   return paths;
+}
+
+// Patch 0052: the relaxed pass's fallback candidates -- every filtered edge
+// that is not a candidate yet. The same candidate is the same edge at the
+// same position on the same side; the rest of a PathEdge follows from those.
+void thor_worker_t::add_filtered_edges(valhalla::Location& loc) {
+  auto* edges = loc.mutable_correlation()->mutable_edges();
+  for (const auto& filtered : loc.correlation().filtered_edges()) {
+    const bool known = std::any_of(edges->begin(), edges->end(), [&filtered](const auto& e) {
+      return e.graph_id() == filtered.graph_id() &&
+             e.percent_along() == filtered.percent_along() &&
+             e.side_of_street() == filtered.side_of_street();
+    });
+    if (!known) {
+      edges->Add()->CopyFrom(filtered);
+    }
+  }
 }
 
 void thor_worker_t::path_arrive_by(Api& api, const std::string& costing) {
@@ -1148,7 +1175,14 @@ void thor_worker_t::path_depart_at(Api& api, const std::string& costing) {
           clean = true;
           break;
         }
-        if (tries == leg_cost.gate_lookahead() || destination->correlation().edges_size() <= 1) {
+        // Patch 0052: another crossing must remain, by edge id. Counting the
+        // candidates is not enough: the relaxed pass used to add a fallback
+        // crossing twice, and dropping the arrival then emptied the gate.
+        const bool another_crossing =
+            std::any_of(destination->correlation().edges().begin(),
+                        destination->correlation().edges().end(),
+                        [&arrival](const auto& e) { return e.graph_id() != arrival; });
+        if (tries == leg_cost.gate_lookahead() || !another_crossing) {
           break;
         }
         remove_path_edges(*destination,

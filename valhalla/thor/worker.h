@@ -50,6 +50,9 @@ public:
   virtual void cleanup() override;
 
   static void adjust_locations(valhalla::Api& options);
+  // Patch 0052: adds the location's filtered edges to its candidate edges,
+  // each candidate (edge, position, side) once however often it is called.
+  static void add_filtered_edges(valhalla::Location& location);
 
   void route(Api& request);
   std::string matrix(Api& request);

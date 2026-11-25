@@ -10,8 +10,10 @@
 // the curvy costing crashes under gurka's bidirectional A*, see patch 0019).
 
 #include "gurka.h"
+#include "loki/worker.h"
 #include "midgard/encoded.h"
 #include "test.h"
+#include "thor/worker.h"
 
 #include <gtest/gtest.h>
 
@@ -489,4 +491,145 @@ TEST_F(LookaheadTest, GateWhoseEveryCrossingTurnsBackIsSkipped) {
   for (const auto& w : result.info().warnings())
     warned = warned || w.code() == 217;
   EXPECT_TRUE(warned);
+}
+
+// Patch 0052 (Vamoto #352, an iPhone abort when a loop was switched to the
+// Adventure profile): a gate with one through crossing (B-C) and one
+// destination-only crossing (E-F, a fallback candidate), both of which turn
+// back. B is reached only over the residents-only A-B, so the first pass to
+// the gate fails and the relaxed pass adds the fallback crossing. The
+// lookahead drops B-C, and the search to the gate that is left needs the
+// relaxed pass again. Before 0052 that added E-F a second time; dropping it
+// after its own lookahead emptied the gate, and the next search read the
+// first candidate of an empty list (absl CHECK, SIGABRT).
+
+namespace {
+
+const std::string kFallbackMap = R"(
+    T---G
+        |
+        |       P---Q
+        |           |
+  O-A---B-----------C
+    |
+    D---E-----------F---H
+  )";
+
+const gurka::ways kFallbackWays = {
+    {"OA", {{"highway", "secondary"}, {"name", "OA"}}},
+    {"AB", {{"highway", "secondary"}, {"name", "AB"}, {"access", "destination"}}},
+    {"BC", {{"highway", "secondary"}, {"name", "BC"}}},
+    {"CQ", {{"highway", "secondary"}, {"name", "CQ"}}},
+    {"QP", {{"highway", "secondary"}, {"name", "QP"}}},
+    {"PC", {{"highway", "secondary"}, {"name", "PC"}}},
+    {"BG", {{"highway", "secondary"}, {"name", "BG"}, {"oneway", "yes"}}},
+    {"GT", {{"highway", "secondary"}, {"name", "GT"}}},
+    {"AD", {{"highway", "secondary"}, {"name", "AD"}}},
+    {"DE", {{"highway", "secondary"}, {"name", "DE"}}},
+    {"EF", {{"highway", "secondary"}, {"name", "EF"}, {"access", "destination"}}},
+    {"FH", {{"highway", "secondary"}, {"name", "FH"}, {"access", "destination"}}},
+};
+
+class FallbackCrossingTest : public ::testing::Test {
+protected:
+  static gurka::map map;
+
+  static void SetUpTestSuite() {
+    const auto layout = gurka::detail::map_to_coordinates(kFallbackMap, 100);
+    map = gurka::buildtiles(layout, kFallbackWays, {}, {},
+                            VALHALLA_BUILD_DIR "test/data/loop_fallback_crossing");
+  }
+
+  static std::string ll(const midgard::PointLL& p) {
+    return R"("lon": )" + std::to_string(p.lng()) + R"(, "lat": )" + std::to_string(p.lat());
+  }
+
+  static std::string request(int lookahead) {
+    const auto& b = map.nodes.at("B");
+    const auto& e = map.nodes.at("E");
+    const auto& p = map.nodes.at("P");
+    // West of P, halfway between B-C and E-F; 150 m each side.
+    const midgard::PointLL gate{(b.lng() + p.lng()) / 2, (b.lat() + e.lat()) / 2};
+    return R"({"locations": [{)" + ll(map.nodes.at("O")) + "}, {" + ll(gate) +
+           R"(, "type": "through", "gate_heading": 90, "gate_radius": 150,)" +
+           R"( "minimum_reachability": 0}, {)" + ll(map.nodes.at("T")) +
+           R"(}], "costing": "motorcycle", "costing_options": {"motorcycle": {"gate_lookahead": )" +
+           std::to_string(lookahead) + "}}}";
+  }
+};
+gurka::map FallbackCrossingTest::map = {};
+
+} // namespace
+
+TEST_F(FallbackCrossingTest, GateWhoseFallbackCrossingTurnsBackToo) {
+  // Every crossing turns back and the gate is the only one: the first leg
+  // stays, as without a lookahead.
+  const auto plain = gurka::do_action(valhalla::Options::route, map, request(0));
+  const auto looked = gurka::do_action(valhalla::Options::route, map, request(3));
+  EXPECT_EQ(gurka::detail::get_paths(plain), gurka::detail::get_paths(looked));
+}
+
+// The relaxed pass's fallback candidates (patch 0052): the same candidate is
+// added once however often a location gets a relaxed pass, and another snap
+// of an edge that is a candidate already stays a candidate of its own.
+TEST(FilteredEdges, EachCandidateIsAddedOnce) {
+  valhalla::Location loc;
+  const auto add = [](google::protobuf::RepeatedPtrField<valhalla::PathEdge>* list, uint64_t id,
+                      double along, valhalla::Location::SideOfStreet side) {
+    auto* e = list->Add();
+    e->set_graph_id(id);
+    e->set_percent_along(along);
+    e->set_side_of_street(side);
+  };
+  auto* corr = loc.mutable_correlation();
+  add(corr->mutable_edges(), 1, 0.0, valhalla::Location::kNone);
+  add(corr->mutable_filtered_edges(), 1, 0.25, valhalla::Location::kLeft); // same edge, other snap
+  add(corr->mutable_filtered_edges(), 1, 0.0, valhalla::Location::kNone);  // the candidate itself
+  add(corr->mutable_filtered_edges(), 2, 0.0, valhalla::Location::kNone);
+
+  thor::thor_worker_t::add_filtered_edges(loc);
+  thor::thor_worker_t::add_filtered_edges(loc);
+
+  ASSERT_EQ(loc.correlation().edges_size(), 3);
+  EXPECT_EQ(loc.correlation().edges(1).graph_id(), 1u);
+  EXPECT_DOUBLE_EQ(loc.correlation().edges(1).percent_along(), 0.25);
+  EXPECT_EQ(loc.correlation().edges(2).graph_id(), 2u);
+  EXPECT_EQ(loc.correlation().filtered_edges_size(), 3);
+}
+
+TEST_F(FallbackCrossingTest, AnotherSnapOfACandidateEdgeIsStillAFallback) {
+  // The origin's only first-pass candidate is A-D at node A; its interior
+  // snap on the same edge is filtered by the preferred side. An excluded
+  // point lies between the two, so only the interior snap can ride on to
+  // D-E. The relaxed pass must add it although its edge is a candidate.
+  const std::string req =
+      R"({"locations": [{"lat": -0.004042400287459576, "lon": 0.0022457779374775422,)"
+      R"( "preferred_side": "opposite", "radius": 100, "search_cutoff": 100,)"
+      R"( "minimum_reachability": 0}, {"lat": -0.0053898670499461015,)"
+      R"( "lon": 0.0035932446999640674, "search_cutoff": 2, "minimum_reachability": 0}],)"
+      R"( "exclude_locations": [{"lat": -0.0037729069349622707, "lon": 0.0017966223499820337}],)"
+      R"( "costing": "motorcycle",)"
+      R"( "date_time": {"type": 1, "value": "2026-11-25T12:00"}})";
+  const auto result = gurka::do_action(valhalla::Options::route, map, req);
+  gurka::assert::raw::expect_path(result, {"AD", "DE"});
+}
+
+TEST_F(FallbackCrossingTest, LocationWithoutACandidateEdgeIsNoPath) {
+  // Whatever empties a location's candidates, the search answers 442 (no
+  // path); before 0052 bidirectional A* read the first candidate unchecked.
+  auto reader = test::make_clean_graphreader(map.config.get_child("mjolnir"));
+  loki::loki_worker_t loki(map.config, reader);
+  thor::thor_worker_t thor(map.config, reader);
+  const std::string req = R"({"locations": [{)" + ll(map.nodes.at("O")) + "}, {" +
+                          ll(map.nodes.at("T")) + R"(}], "costing": "motorcycle"})";
+  valhalla::Api api;
+  ParseApi(req, valhalla::Options::route, api);
+  loki.route(api);
+  auto* destination = api.mutable_options()->mutable_locations(1)->mutable_correlation();
+  destination->mutable_edges()->Clear();
+  destination->mutable_filtered_edges()->Clear();
+  try {
+    thor.route(api);
+    FAIL() << "a location without a candidate edge was routed";
+  } catch (const valhalla_exception_t& e) { EXPECT_EQ(e.code, 442u); }
 }
